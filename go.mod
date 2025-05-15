@@ -301,7 +301,7 @@ replace (
 	github.com/mdlayher/arp => github.com/kubeovn/arp v0.0.0-20240218024213-d9612a263f68
 	github.com/openshift/api => github.com/openshift/api v0.0.0-20191219222812-2987a591a72c
 	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20210112165513-ebc401615f47
-	github.com/ovn-org/libovsdb => github.com/kubeovn/libovsdb v0.0.0-20241120032411-25ef1bbc83a5
+	github.com/ovn-org/libovsdb => github.com/kubeovn/libovsdb v0.0.0-20250515085808-79a99472e52c
 	k8s.io/api => k8s.io/api v0.32.4
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.32.4
 	k8s.io/apimachinery => k8s.io/apimachinery v0.32.4
