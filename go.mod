@@ -107,6 +107,7 @@ require (
 	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
 	github.com/kelseyhightower/envconfig v1.4.0 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/kubeovn/libovsdb v0.0.0-20250515073406-70c8e6105751 // indirect
 	github.com/kubernetes-csi/external-snapshotter/client/v4 v4.2.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
@@ -191,7 +192,7 @@ require (
 replace (
 	github.com/mdlayher/arp => github.com/kubeovn/arp v0.0.0-20240218024213-d9612a263f68
 	github.com/openshift/client-go => github.com/openshift/client-go v0.0.1
-	github.com/ovn-org/libovsdb => github.com/kubeovn/libovsdb v0.0.0-20240218023647-f0bc3ce57fcd
+	github.com/ovn-org/libovsdb => github.com/kubeovn/libovsdb v0.0.0-20250515073406-70c8e6105751
 	k8s.io/api => k8s.io/api v0.30.3
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.30.3
 	k8s.io/apimachinery => k8s.io/apimachinery v0.30.3
