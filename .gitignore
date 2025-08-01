@@ -53,15 +53,16 @@ kube-ovn-cni-sa.yaml
 kube-ovn-sa.yaml
 ovn-ovs-sa.yaml
 ovs-ovn-ds.yaml
+cakey.pem
 cacert.pem
 ovn-req.pem
 ovn-cert.pem
 ovn-privkey.pem
 anp-test-report.yaml
 # Generated files used for Talos testing
-libvirt-domain.xml
-talosconfig
-controlplane.yaml
-worker.yaml
-cluster-patch.yaml
-machine-patch.yaml
+talos/libvirt-domain.xml
+talos/talosconfig
+talos/controlplane.yaml
+talos/worker.yaml
+talos/cluster-config.yaml
+talos/machine-config.yaml

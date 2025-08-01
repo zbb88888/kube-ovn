@@ -24,8 +24,16 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
+func setACLName(acl *ovnnb.ACL, name string) {
+	if len(name) > 63 {
+		// ACL name length limit is 63
+		name = name[:60] + "..."
+	}
+	acl.Name = ptr.To(name)
+}
+
 // UpdateIngressACLOps return operation that creates an ingress ACL
-func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateIngressACLOps(netpol, pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
 	acls := make([]*ovnnb.ACL, 0)
 
 	if strings.HasSuffix(asIngressName, ".0") || strings.HasSuffix(asIngressName, ".all") {
@@ -36,6 +44,7 @@ func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, p
 			NewACLMatch("ip", "", "", ""),
 		)
 		options := func(acl *ovnnb.ACL) {
+			setACLName(acl, netpol)
 			if logEnable {
 				acl.Log = true
 				acl.Severity = ptr.To(ovnnb.ACLSeverityWarning)
@@ -55,8 +64,8 @@ func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, p
 	matches := newNetworkPolicyACLMatch(pgName, asIngressName, asExceptName, protocol, ovnnb.ACLDirectionToLport, npp, namedPortMap)
 	for _, m := range matches {
 		options := func(acl *ovnnb.ACL) {
+			setACLName(acl, aclName)
 			if logEnable && slices.Contains(logACLActions, ovnnb.ACLActionAllow) {
-				acl.Name = &aclName
 				acl.Log = true
 			}
 		}
@@ -80,7 +89,7 @@ func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, p
 }
 
 // UpdateEgressACLOps return operation that creates an egress ACL
-func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateEgressACLOps(netpol, pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
 	acls := make([]*ovnnb.ACL, 0)
 
 	if strings.HasSuffix(asEgressName, ".0") || strings.HasSuffix(asEgressName, ".all") {
@@ -91,6 +100,7 @@ func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, pro
 			NewACLMatch("ip", "", "", ""),
 		)
 		options := func(acl *ovnnb.ACL) {
+			setACLName(acl, netpol)
 			if logEnable {
 				acl.Log = true
 				acl.Severity = ptr.To(ovnnb.ACLSeverityWarning)
@@ -115,13 +125,12 @@ func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, pro
 	matches := newNetworkPolicyACLMatch(pgName, asEgressName, asExceptName, protocol, ovnnb.ACLDirectionFromLport, npp, namedPortMap)
 	for _, m := range matches {
 		allowACL, err := c.newACLWithoutCheck(pgName, ovnnb.ACLDirectionFromLport, util.EgressAllowPriority, m, ovnnb.ACLActionAllowRelated, util.NetpolACLTier, func(acl *ovnnb.ACL) {
+			setACLName(acl, aclName)
 			if acl.Options == nil {
 				acl.Options = make(map[string]string)
 			}
 			acl.Options["apply-after-lb"] = "true"
-
 			if logEnable && slices.Contains(logACLActions, ovnnb.ACLActionAllow) {
-				acl.Name = &aclName
 				acl.Log = true
 			}
 		})
@@ -441,14 +450,14 @@ func (c *OVNNbClient) UpdateSgACL(sg *kubeovnv1.SecurityGroup, direction string)
 }
 
 func (c *OVNNbClient) UpdateLogicalSwitchACL(lsName, cidrBlock string, subnetAcls []kubeovnv1.ACL, allowEWTraffic bool) error {
-	if err := c.DeleteAcls(lsName, logicalSwitchKey, "", map[string]string{"subnet": lsName}); err != nil {
-		klog.Error(err)
-		return fmt.Errorf("delete subnet acls from %s: %w", lsName, err)
-	}
-
 	if len(subnetAcls) == 0 {
+		if err := c.DeleteAcls(lsName, logicalSwitchKey, "", map[string]string{"subnet": lsName}); err != nil {
+			klog.Error(err)
+			return fmt.Errorf("delete subnet acls from %s: %w", lsName, err)
+		}
 		return nil
 	}
+
 	acls := make([]*ovnnb.ACL, 0)
 
 	options := func(acl *ovnnb.ACL) {
@@ -499,9 +508,21 @@ func (c *OVNNbClient) UpdateLogicalSwitchACL(lsName, cidrBlock string, subnetAcl
 		acls = append(acls, acl)
 	}
 
-	if err := c.CreateAcls(lsName, logicalSwitchKey, acls...); err != nil {
+	delOps, err := c.DeleteAclsOps(lsName, logicalSwitchKey, "", map[string]string{"subnet": lsName})
+	if err != nil {
 		klog.Error(err)
-		return fmt.Errorf("add acls to logical switch %s: %w", lsName, err)
+		return err
+	}
+
+	addOps, err := c.CreateAclsOps(lsName, logicalSwitchKey, acls...)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	if err := c.Transact("acls-update", append(delOps, addOps...)); err != nil {
+		klog.Error(err)
+		return fmt.Errorf("update acls for logical switch %s: %w", lsName, err)
 	}
 
 	return nil
@@ -541,7 +562,7 @@ func (c *OVNNbClient) SetLogicalSwitchPrivate(lsName, cidrBlock, nodeSwitchCIDR 
 	allIPMatch := NewACLMatch("ip", "", "", "")
 
 	options := func(acl *ovnnb.ACL) {
-		acl.Name = &lsName
+		setACLName(acl, lsName)
 		acl.Log = true
 		acl.Severity = ptr.To(ovnnb.ACLSeverityWarning)
 	}
@@ -1331,6 +1352,8 @@ func (c *OVNNbClient) UpdateAnpRuleACLOps(pgName, asName, protocol, aclName stri
 	acls := make([]*ovnnb.ACL, 0, 10)
 
 	options := func(acl *ovnnb.ACL) {
+		setACLName(acl, aclName)
+
 		if acl.ExternalIDs == nil {
 			acl.ExternalIDs = make(map[string]string)
 		}
@@ -1342,7 +1365,6 @@ func (c *OVNNbClient) UpdateAnpRuleACLOps(pgName, asName, protocol, aclName stri
 		acl.Options["apply-after-lb"] = "true"
 
 		if slices.Contains(logACLActions, aclAction) {
-			acl.Name = &aclName
 			acl.Log = true
 			if aclAction == ovnnb.ACLActionDrop {
 				acl.Severity = ptr.To(ovnnb.ACLSeverityWarning)
@@ -1442,4 +1464,92 @@ func newAnpACLMatch(pgName, asName, protocol, direction string, rulePorts []v1al
 		}
 	}
 	return matches
+}
+
+func (c *OVNNbClient) MigrateACLTier() error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	defer cancel()
+
+	var aclList []ovnnb.ACL
+	if err := c.ovsDbClient.WhereCache(func(acl *ovnnb.ACL) bool { return acl.Tier == 0 }).List(ctx, &aclList); err != nil {
+		err = fmt.Errorf("failed to list acls with tier 0: %w", err)
+		klog.Error(err)
+		return err
+	}
+
+	ops := make([]ovsdb.Operation, 0, len(aclList))
+	for _, acl := range aclList {
+		acl.Tier = util.NetpolACLTier
+		op, err := c.Where(&acl).Update(&acl, &acl.Tier)
+		if err != nil {
+			klog.Error(err)
+			return fmt.Errorf("failed to generate operations for updating acl %s tier: %w", acl.UUID, err)
+		}
+		ops = append(ops, op...)
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+
+	if err := c.Transact("acl-migrate-tier", ops); err != nil {
+		klog.Error(err)
+		return fmt.Errorf("failed to migrate acl tier: %w", err)
+	}
+
+	return nil
+}
+
+func (c *OVNNbClient) CleanNoParentKeyAcls() error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
+	defer cancel()
+
+	var aclList []ovnnb.ACL
+	if err := c.ovsDbClient.WhereCache(func(acl *ovnnb.ACL) bool {
+		_, ok := acl.ExternalIDs[aclParentKey]
+		return !ok
+	}).List(ctx, &aclList); err != nil {
+		err = fmt.Errorf("failed to list acls without parent: %w", err)
+		klog.Error(err)
+		return err
+	}
+
+	ops := make([]ovsdb.Operation, 0, len(aclList))
+	for _, acl := range aclList {
+		var portGroups []ovnnb.PortGroup
+		if err := c.ovsDbClient.WhereCache(func(pg *ovnnb.PortGroup) bool {
+			return slices.Contains(pg.ACLs, acl.UUID)
+		}).List(ctx, &portGroups); err == nil {
+			for _, pg := range portGroups {
+				op, err := c.portGroupUpdateACLOp(pg.Name, []string{acl.UUID}, ovsdb.MutateOperationDelete)
+				if err == nil {
+					ops = append(ops, op...)
+				}
+			}
+		}
+		var logicalSwitches []ovnnb.LogicalSwitch
+		if err := c.ovsDbClient.WhereCache(func(ls *ovnnb.LogicalSwitch) bool {
+			return slices.Contains(ls.ACLs, acl.UUID)
+		}).List(ctx, &logicalSwitches); err == nil {
+			for _, ls := range logicalSwitches {
+				op, err := c.logicalSwitchUpdateACLOp(ls.Name, []string{acl.UUID}, ovsdb.MutateOperationDelete)
+				if err == nil {
+					ops = append(ops, op...)
+				}
+			}
+		}
+		delOp, err := c.Where(&acl).Delete()
+		if err == nil {
+			ops = append(ops, delOp...)
+		}
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+
+	if err := c.Transact("acl-clean-no-parent", ops); err != nil {
+		klog.Error(err)
+		return fmt.Errorf("failed to clean acls without parent: %w", err)
+	}
+
+	return nil
 }

@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -51,9 +53,10 @@ type Controller struct {
 	ovnEipsLister kubeovnlister.OvnEipLister
 	ovnEipsSynced cache.InformerSynced
 
-	podsLister listerv1.PodLister
-	podsSynced cache.InformerSynced
-	podQueue   workqueue.TypedRateLimitingInterface[string]
+	podsLister     listerv1.PodLister
+	podsSynced     cache.InformerSynced
+	updatePodQueue workqueue.TypedRateLimitingInterface[string]
+	deletePodQueue workqueue.TypedRateLimitingInterface[string]
 
 	nodesLister listerv1.NodeLister
 	nodesSynced cache.InformerSynced
@@ -61,6 +64,10 @@ type Controller struct {
 	servicesLister listerv1.ServiceLister
 	servicesSynced cache.InformerSynced
 	serviceQueue   workqueue.TypedRateLimitingInterface[*serviceEvent]
+
+	caSecretLister listerv1.SecretLister
+	caSecretSynced cache.InformerSynced
+	ipsecQueue     workqueue.TypedRateLimitingInterface[string]
 
 	recorder record.EventRecorder
 
@@ -81,7 +88,11 @@ func newTypedRateLimitingQueue[T comparable](name string, rateLimiter workqueue.
 }
 
 // NewController init a daemon controller
-func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFactory, nodeInformerFactory informers.SharedInformerFactory, kubeovnInformerFactory kubeovninformer.SharedInformerFactory) (*Controller, error) {
+func NewController(config *Configuration,
+	stopCh <-chan struct{},
+	podInformerFactory, nodeInformerFactory, caSecretInformerFactory informers.SharedInformerFactory,
+	kubeovnInformerFactory kubeovninformer.SharedInformerFactory,
+) (*Controller, error) {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.Infof)
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: config.KubeClient.CoreV1().Events(v1.NamespaceAll)})
@@ -93,6 +104,7 @@ func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFac
 	podInformer := podInformerFactory.Core().V1().Pods()
 	nodeInformer := nodeInformerFactory.Core().V1().Nodes()
 	servicesInformer := nodeInformerFactory.Core().V1().Services()
+	caSecretInformer := caSecretInformerFactory.Core().V1().Secrets()
 
 	controller := &Controller{
 		config: config,
@@ -112,9 +124,10 @@ func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFac
 		ovnEipsLister: ovnEipInformer.Lister(),
 		ovnEipsSynced: ovnEipInformer.Informer().HasSynced,
 
-		podsLister: podInformer.Lister(),
-		podsSynced: podInformer.Informer().HasSynced,
-		podQueue:   newTypedRateLimitingQueue[string]("Pod", nil),
+		podsLister:     podInformer.Lister(),
+		podsSynced:     podInformer.Informer().HasSynced,
+		updatePodQueue: newTypedRateLimitingQueue[string]("UpdatePod", nil),
+		deletePodQueue: newTypedRateLimitingQueue[string]("DeletePod", nil),
 
 		nodesLister: nodeInformer.Lister(),
 		nodesSynced: nodeInformer.Informer().HasSynced,
@@ -122,6 +135,10 @@ func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFac
 		servicesLister: servicesInformer.Lister(),
 		servicesSynced: servicesInformer.Informer().HasSynced,
 		serviceQueue:   newTypedRateLimitingQueue[*serviceEvent]("Service", nil),
+
+		caSecretLister: caSecretInformer.Lister(),
+		caSecretSynced: caSecretInformer.Informer().HasSynced,
+		ipsecQueue:     newTypedRateLimitingQueue[string]("IPSecCA", nil),
 
 		recorder: recorder,
 		k8sExec:  k8sexec.New(),
@@ -140,10 +157,11 @@ func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFac
 	podInformerFactory.Start(stopCh)
 	nodeInformerFactory.Start(stopCh)
 	kubeovnInformerFactory.Start(stopCh)
+	caSecretInformerFactory.Start(stopCh)
 
 	if !cache.WaitForCacheSync(stopCh,
 		controller.providerNetworksSynced, controller.vlansSynced, controller.subnetsSynced,
-		controller.podsSynced, controller.nodesSynced, controller.servicesSynced) {
+		controller.podsSynced, controller.nodesSynced, controller.servicesSynced, controller.caSecretSynced) {
 		util.LogFatalAndExit(nil, "failed to wait for caches to sync")
 	}
 
@@ -175,12 +193,38 @@ func NewController(config *Configuration, stopCh <-chan struct{}, podInformerFac
 	}
 
 	if _, err = podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: controller.enqueuePod,
+		UpdateFunc: controller.enqueueUpdatePod,
+		DeleteFunc: controller.enqueueDeletePod,
+	}); err != nil {
+		return nil, err
+	}
+	if _, err = caSecretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    controller.enqueueAddIPSecCA,
+		UpdateFunc: controller.enqueueUpdateIPSecCA,
 	}); err != nil {
 		return nil, err
 	}
 
 	return controller, nil
+}
+
+func (c *Controller) enqueueAddIPSecCA(obj any) {
+	key := cache.MetaObjectToName(obj.(*v1.Secret)).String()
+	klog.V(3).Infof("enqueue add CA %s", key)
+	c.ipsecQueue.Add(key)
+}
+
+func (c *Controller) enqueueUpdateIPSecCA(oldObj, newObj any) {
+	oldSecret := oldObj.(*v1.Secret)
+	newSecret := newObj.(*v1.Secret)
+	if maps.EqualFunc(oldSecret.Data, newSecret.Data, bytes.Equal) {
+		// No changes in CA data, no need to enqueue
+		return
+	}
+
+	key := cache.MetaObjectToName(newSecret).String()
+	klog.V(3).Infof("enqueue update CA %s", key)
+	c.ipsecQueue.Add(key)
 }
 
 func (c *Controller) enqueueAddProviderNetwork(obj any) {
@@ -272,7 +316,13 @@ func (c *Controller) handleAddOrUpdateProviderNetwork(key string) error {
 		return err
 	}
 
-	if slices.Contains(pn.Spec.ExcludeNodes, node.Name) {
+	excluded, err := util.IsNodeExcludedFromProviderNetwork(node, pn)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	if excluded {
 		c.recordProviderNetworkErr(pn.Name, "")
 		return c.cleanProviderNetwork(pn.DeepCopy(), node.DeepCopy())
 	}
@@ -518,7 +568,7 @@ func (c *Controller) processNextServiceWorkItem() bool {
 	return true
 }
 
-func (c *Controller) enqueuePod(oldObj, newObj any) {
+func (c *Controller) enqueueUpdatePod(oldObj, newObj any) {
 	oldPod := oldObj.(*v1.Pod)
 	newPod := newObj.(*v1.Pod)
 	key := cache.MetaObjectToName(newPod).String()
@@ -529,8 +579,9 @@ func (c *Controller) enqueuePod(oldObj, newObj any) {
 		oldPod.Annotations[util.NetemQosJitterAnnotation] != newPod.Annotations[util.NetemQosJitterAnnotation] ||
 		oldPod.Annotations[util.NetemQosLimitAnnotation] != newPod.Annotations[util.NetemQosLimitAnnotation] ||
 		oldPod.Annotations[util.NetemQosLossAnnotation] != newPod.Annotations[util.NetemQosLossAnnotation] ||
-		oldPod.Annotations[util.MirrorControlAnnotation] != newPod.Annotations[util.MirrorControlAnnotation] {
-		c.podQueue.Add(key)
+		oldPod.Annotations[util.MirrorControlAnnotation] != newPod.Annotations[util.MirrorControlAnnotation] ||
+		oldPod.Annotations[util.IPAddressAnnotation] != newPod.Annotations[util.IPAddressAnnotation] {
+		c.updatePodQueue.Add(key)
 		return
 	}
 
@@ -548,30 +599,63 @@ func (c *Controller) enqueuePod(oldObj, newObj any) {
 				oldPod.Annotations[fmt.Sprintf(util.NetemQosLimitAnnotationTemplate, provider)] != newPod.Annotations[fmt.Sprintf(util.NetemQosLimitAnnotationTemplate, provider)] ||
 				oldPod.Annotations[fmt.Sprintf(util.NetemQosLossAnnotationTemplate, provider)] != newPod.Annotations[fmt.Sprintf(util.NetemQosLossAnnotationTemplate, provider)] ||
 				oldPod.Annotations[fmt.Sprintf(util.MirrorControlAnnotationTemplate, provider)] != newPod.Annotations[fmt.Sprintf(util.MirrorControlAnnotationTemplate, provider)] {
-				c.podQueue.Add(key)
+				c.updatePodQueue.Add(key)
 			}
 		}
 	}
 }
 
-func (c *Controller) runPodWorker() {
-	for c.processNextPodWorkItem() {
+func (c *Controller) enqueueDeletePod(obj any) {
+	pod := obj.(*v1.Pod)
+	key := cache.MetaObjectToName(pod).String()
+	c.deletePodQueue.Add(key)
+}
+
+func (c *Controller) runUpdatePodWorker() {
+	for c.processNextUpdatePodWorkItem() {
 	}
 }
 
-func (c *Controller) processNextPodWorkItem() bool {
-	key, shutdown := c.podQueue.Get()
+func (c *Controller) runDeletePodWorker() {
+	for c.processNextDeletePodWorkItem() {
+	}
+}
+
+func (c *Controller) processNextUpdatePodWorkItem() bool {
+	key, shutdown := c.updatePodQueue.Get()
 	if shutdown {
 		return false
 	}
 
 	err := func(key string) error {
-		defer c.podQueue.Done(key)
-		if err := c.handlePod(key); err != nil {
-			c.podQueue.AddRateLimited(key)
+		defer c.updatePodQueue.Done(key)
+		if err := c.handleUpdatePod(key); err != nil {
+			c.updatePodQueue.AddRateLimited(key)
 			return fmt.Errorf("error syncing %q: %w, requeuing", key, err)
 		}
-		c.podQueue.Forget(key)
+		c.updatePodQueue.Forget(key)
+		return nil
+	}(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+	return true
+}
+
+func (c *Controller) processNextDeletePodWorkItem() bool {
+	key, shutdown := c.deletePodQueue.Get()
+	if shutdown {
+		return false
+	}
+
+	err := func(key string) error {
+		defer c.deletePodQueue.Done(key)
+		if err := c.handleDeletePod(key); err != nil {
+			c.deletePodQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing %q: %w, requeuing", key, err)
+		}
+		c.deletePodQueue.Forget(key)
 		return nil
 	}(key)
 	if err != nil {
@@ -608,6 +692,37 @@ func (c *Controller) markAndCleanInternalPort() error {
 	return nil
 }
 
+func (c *Controller) runIPSecWorker() {
+	if err := c.StartIPSecService(); err != nil {
+		klog.Errorf("starting ipsec service: %v", err)
+	}
+
+	for c.processNextIPSecWorkItem() {
+	}
+}
+
+func (c *Controller) processNextIPSecWorkItem() bool {
+	key, shutdown := c.ipsecQueue.Get()
+	if shutdown {
+		return false
+	}
+	defer c.ipsecQueue.Done(key)
+
+	err := func(key string) error {
+		if err := c.SyncIPSecKeys(key); err != nil {
+			c.ipsecQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing %q: %w, requeuing", key, err)
+		}
+		c.ipsecQueue.Forget(key)
+		return nil
+	}(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+	return true
+}
+
 // Run starts controller
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -615,8 +730,9 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer c.deleteProviderNetworkQueue.ShutDown()
 	defer c.subnetQueue.ShutDown()
 	defer c.serviceQueue.ShutDown()
-	defer c.podQueue.ShutDown()
-
+	defer c.updatePodQueue.ShutDown()
+	defer c.deletePodQueue.ShutDown()
+	defer c.ipsecQueue.ShutDown()
 	go wait.Until(ovs.CleanLostInterface, time.Minute, stopCh)
 	go wait.Until(recompute, 10*time.Minute, stopCh)
 	go wait.Until(rotateLog, 1*time.Hour, stopCh)
@@ -633,7 +749,9 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go wait.Until(c.runAddOrUpdateServicekWorker, time.Second, stopCh)
 	go wait.Until(c.runDeleteProviderNetworkWorker, time.Second, stopCh)
 	go wait.Until(c.runSubnetWorker, time.Second, stopCh)
-	go wait.Until(c.runPodWorker, time.Second, stopCh)
+	go wait.Until(c.runUpdatePodWorker, time.Second, stopCh)
+	go wait.Until(c.runDeletePodWorker, time.Second, stopCh)
+	go wait.Until(c.runIPSecWorker, 3*time.Second, stopCh)
 	go wait.Until(c.runGateway, 3*time.Second, stopCh)
 	go wait.Until(c.loopEncapIPCheck, 3*time.Second, stopCh)
 	go wait.Until(c.ovnMetricsUpdate, 3*time.Second, stopCh)
@@ -659,14 +777,8 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 		c.cleanTProxyConfig()
 	}
 
-	if c.config.EnableOVNIPSec {
-		go wait.Until(func() {
-			if err := c.ManageIPSecKeys(); err != nil {
-				klog.Errorf("manage ipsec keys error: %v", err)
-			}
-		}, 24*time.Hour, stopCh)
-	} else {
-		if err := c.StopAndClearIPSecResouce(); err != nil {
+	if !c.config.EnableOVNIPSec {
+		if err := c.StopAndClearIPSecResource(); err != nil {
 			klog.Errorf("stop and clear ipsec resource error: %v", err)
 		}
 	}

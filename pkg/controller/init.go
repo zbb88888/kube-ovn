@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -29,7 +30,12 @@ import (
 func (c *Controller) InitOVN() error {
 	var err error
 
-	if err := c.InitDefaultVpc(); err != nil {
+	if err = c.migrateACLForVersionCompat(); err != nil {
+		klog.Errorf("failed to sync the older acl : %v", err)
+		return err
+	}
+
+	if err = c.InitDefaultVpc(); err != nil {
 		klog.Errorf("init default vpc failed: %v", err)
 		return err
 	}
@@ -61,6 +67,22 @@ func (c *Controller) InitOVN() error {
 		return err
 	}
 
+	return nil
+}
+
+func (c *Controller) migrateACLForVersionCompat() error {
+	// migrate tier field of ACL rules created in versions prior to v1.13.0
+	// after upgrading, the tier field has a default value of zero, which is not the value used in versions >= v1.13.0
+	// we need to migrate the tier field to the correct value
+	if err := c.OVNNbClient.MigrateACLTier(); err != nil {
+		klog.Errorf("failed to migrate ACL tier: %v", err)
+		return err
+	}
+	// clean all no parent key acls
+	if err := c.OVNNbClient.CleanNoParentKeyAcls(); err != nil {
+		klog.Errorf("failed to clean all no parent key acls: %v", err)
+		return err
+	}
 	return nil
 }
 
@@ -217,11 +239,16 @@ func (c *Controller) initClusterRouter() error {
 		return err
 	}
 
-	lr.Options = map[string]string{"always_learn_from_arp_request": "false", "dynamic_neigh_routers": "true", "mac_binding_age_threshold": "300"}
-	err = c.OVNNbClient.UpdateLogicalRouter(lr, &lr.Options)
-	if err != nil {
-		klog.Errorf("update logical router %s failed: %v", c.config.ClusterRouter, err)
-		return err
+	lrOptions := make(map[string]string, len(lr.Options))
+	maps.Copy(lrOptions, lr.Options)
+	lrOptions["mac_binding_age_threshold"] = "300"
+	lrOptions["dynamic_neigh_routers"] = "true"
+	if !maps.Equal(lr.Options, lrOptions) {
+		lr.Options = lrOptions
+		if err = c.OVNNbClient.UpdateLogicalRouter(lr, &lr.Options); err != nil {
+			klog.Errorf("update logical router %s failed: %v", c.config.ClusterRouter, err)
+			return err
+		}
 	}
 
 	return nil

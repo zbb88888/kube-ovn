@@ -46,6 +46,7 @@ func (c *Controller) gc() error {
 		c.gcStaticRoute,
 		c.gcVpcNatGateway,
 		c.gcLogicalRouterPort,
+		c.gcIP,
 		c.gcVip,
 		c.gcLbSvcPods,
 		c.gcVPCDNS,
@@ -102,12 +103,11 @@ func (c *Controller) gcVpcNatGateway() error {
 				return err
 			}
 		}
-		gwStsNames = append(gwStsNames, util.GenNatGwStsName(gw.Name))
+		gwStsNames = append(gwStsNames, util.GenNatGwName(gw.Name))
 	}
 
-	sel, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{util.VpcNatGatewayLabel: "true"}})
 	stss, err := c.config.KubeClient.AppsV1().StatefulSets(c.config.PodNamespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: sel.String(),
+		LabelSelector: labels.Set{util.VpcNatGatewayLabel: "true"}.AsSelector().String(),
 	})
 	if err != nil {
 		klog.Errorf("failed to list vpc nat gateway statefulset, %v", err)
@@ -316,6 +316,24 @@ func (c *Controller) gcVip() error {
 	return nil
 }
 
+func (c *Controller) gcIP() error {
+	klog.Infof("start to gc ips")
+	ips, err := c.ipsLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list ip, %v", err)
+		return err
+	}
+	for _, ip := range ips {
+		if _, ok := c.ipam.Subnets[ip.Spec.Subnet]; !ok {
+			klog.Infof("subnet %s already not exist, gc ip %s", ip.Spec.Subnet, ip.Name)
+			if err := c.config.KubeOvnClient.KubeovnV1().IPs().Delete(context.Background(), ip.Name, metav1.DeleteOptions{}); err != nil {
+				klog.Errorf("failed to gc ip %s, %v", ip.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Controller) markAndCleanLSP() error {
 	klog.V(4).Infof("start to gc logical switch ports")
 	pods, err := c.podsLister.List(labels.Everything())
@@ -376,7 +394,19 @@ func (c *Controller) markAndCleanLSP() error {
 	vipsMap := strset.NewWithSize(len(vips))
 	for _, vip := range vips {
 		if vip.Spec.Type != "" {
-			portName := ovs.PodNameToPortName(vip.Name, vip.Spec.Namespace, util.OvnProvider)
+			subnetName := vip.Spec.Subnet
+			if subnetName == "" {
+				klog.Errorf("failed to gc vip '%s', subnet should be set", vip.Name)
+				continue
+			}
+
+			subnet, err := c.subnetsLister.Get(subnetName)
+			if err != nil {
+				klog.Errorf("failed to get subnet %s: %v", subnetName, err)
+				continue
+			}
+
+			portName := ovs.PodNameToPortName(vip.Name, vip.Spec.Namespace, subnet.Spec.Provider)
 			vipsMap.Add(portName)
 		}
 	}
@@ -1071,10 +1101,9 @@ func (c *Controller) gcVPCDNS() error {
 		return err
 	}
 
-	sel, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{util.VpcDNSNameLabel: "true"}})
-
+	labelSelector := labels.Set{util.VpcDNSNameLabel: "true"}.AsSelector()
 	deps, err := c.config.KubeClient.AppsV1().Deployments(c.config.PodNamespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: sel.String(),
+		LabelSelector: labelSelector.String(),
 	})
 	if err != nil {
 		klog.Errorf("failed to list vpc-dns deployment, %s", err)
@@ -1100,7 +1129,7 @@ func (c *Controller) gcVPCDNS() error {
 		}
 	}
 
-	slrs, err := c.switchLBRuleLister.List(sel)
+	slrs, err := c.switchLBRuleLister.List(labelSelector)
 	if err != nil {
 		klog.Errorf("failed to list vpc-dns SwitchLBRules, %s", err)
 		return err

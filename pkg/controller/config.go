@@ -97,6 +97,7 @@ type Configuration struct {
 	EnableMetrics               bool
 	EnableANP                   bool
 	EnableOVNIPSec              bool
+	CertManagerIPSecCert        bool
 	EnableLiveMigrationOptimize bool
 
 	ExternalGatewaySwitch   string
@@ -115,6 +116,14 @@ type Configuration struct {
 
 	// used to set vpc-egress-gateway image
 	Image string
+
+	// used to set log file permission
+	LogPerm string
+
+	// TLS configuration for secure serving
+	TLSMinVersion   string
+	TLSMaxVersion   string
+	TLSCipherSuites []string
 }
 
 // ParseFlags parses cmd args then init kubeclient and conf
@@ -180,6 +189,7 @@ func ParseFlags() (*Configuration, error) {
 		argEnableMetrics               = pflag.Bool("enable-metrics", true, "Whether to support metrics query")
 		argEnableANP                   = pflag.Bool("enable-anp", false, "Enable support for admin network policy and baseline admin network policy")
 		argEnableOVNIPSec              = pflag.Bool("enable-ovn-ipsec", false, "Whether to enable ovn ipsec")
+		argCertManagerIPSecCert        = pflag.Bool("cert-manager-ipsec-cert", false, "Whether to use cert-manager for signing IPSec certificates")
 		argEnableLiveMigrationOptimize = pflag.Bool("enable-live-migration-optimize", true, "Whether to enable kubevirt live migration optimize")
 
 		argExternalGatewayConfigNS = pflag.String("external-gateway-config-ns", "kube-system", "The namespace of configmap external-gateway-config, default: kube-system")
@@ -196,6 +206,12 @@ func ParseFlags() (*Configuration, error) {
 		argBfdDetectMult = pflag.Int("detect-mult", 3, "The negotiated transmit interval, multiplied by this value, provides the Detection Time for the receiving system in Asynchronous mode.")
 
 		argImage = pflag.String("image", "", "The image for vpc-egress-gateway")
+
+		argLogPerm = pflag.String("log-perm", "640", "The permission for the log file")
+
+		argTLSMinVersion   = pflag.String("tls-min-version", "", "The minimum TLS version to use for secure serving. Supported values: TLS10, TLS11, TLS12, TLS13. If not set, the default is used based on the Go version.")
+		argTLSMaxVersion   = pflag.String("tls-max-version", "", "The maximum TLS version to use for secure serving. Supported values: TLS10, TLS11, TLS12, TLS13. If not set, the default is used based on the Go version.")
+		argTLSCipherSuites = pflag.StringSlice("tls-cipher-suites", nil, "Comma-separated list of TLS cipher suite names to use for secure serving (e.g., 'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384'). Names must match Go's crypto/tls package. See Go documentation for available suites. If not set, defaults are used. Users are responsible for selecting secure cipher suites.")
 	)
 
 	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
@@ -276,12 +292,17 @@ func ParseFlags() (*Configuration, error) {
 		EnableOVNLBPreferLocal:         *argEnableOVNLBPreferLocal,
 		EnableMetrics:                  *argEnableMetrics,
 		EnableOVNIPSec:                 *argEnableOVNIPSec,
+		CertManagerIPSecCert:           *argCertManagerIPSecCert,
 		EnableLiveMigrationOptimize:    *argEnableLiveMigrationOptimize,
 		BfdMinTx:                       *argBfdMinTx,
 		BfdMinRx:                       *argBfdMinRx,
 		BfdDetectMult:                  *argBfdDetectMult,
 		EnableANP:                      *argEnableANP,
 		Image:                          *argImage,
+		LogPerm:                        *argLogPerm,
+		TLSMinVersion:                  *argTLSMinVersion,
+		TLSMaxVersion:                  *argTLSMaxVersion,
+		TLSCipherSuites:                *argTLSCipherSuites,
 	}
 
 	if config.NetworkType == util.NetworkTypeVlan && config.DefaultHostInterface == "" {

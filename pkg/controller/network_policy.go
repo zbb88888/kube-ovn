@@ -143,7 +143,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 			protocolSet.Add(subnet.Spec.Protocol)
 		}
 	}
-	klog.Infof("UpdateNp, releated subnets protocols %s", protocolSet.String())
+	klog.Infof("UpdateNp, related subnets protocols %s", protocolSet.String())
 
 	if err = c.OVNNbClient.PortGroupSetPorts(pgName, ports); err != nil {
 		klog.Errorf("failed to set ports of port group %s to %v: %v", pgName, ports, err)
@@ -198,7 +198,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					npp = npr.Ports
 				}
 
-				ops, err := c.OVNNbClient.UpdateIngressACLOps(pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateIngressACLOps(key, pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add ingress acls to np %s: %v", key, err)
 					return err
@@ -220,7 +220,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					return err
 				}
 
-				ops, err := c.OVNNbClient.UpdateIngressACLOps(pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateIngressACLOps(key, pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add ingress acls to np %s: %v", key, err)
 					return err
@@ -311,7 +311,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 						excepts = append(excepts, except...)
 					}
 				}
-				klog.Infof("UpdateNp Egress, allows is %v, excepts is %v, log %v", allows, excepts, logEnable)
+				klog.Infof("UpdateNp Egress %s, allows is %v, excepts is %v, log %v", aclName, allows, excepts, logEnable)
 
 				if err = c.createAsForNetpol(np.Namespace, npName, "egress", egressAllowAsName, allows); err != nil {
 					klog.Error(err)
@@ -327,7 +327,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					npp = npr.Ports
 				}
 
-				ops, err := c.OVNNbClient.UpdateEgressACLOps(pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateEgressACLOps(key, pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add egress acls to np %s: %v", key, err)
 					return err
@@ -349,7 +349,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					return err
 				}
 
-				ops, err := c.OVNNbClient.UpdateEgressACLOps(pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateEgressACLOps(key, pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add egress acls to np %s: %v", key, err)
 					return err
@@ -603,11 +603,7 @@ func svcMatchPods(svcs []*corev1.Service, pod *corev1.Pod, protocol string) ([]s
 	matchSvcs := []string{}
 	// find svc ip by pod's info
 	for _, svc := range svcs {
-		isMatch, err := isSvcMatchPod(svc, pod)
-		if err != nil {
-			return nil, err
-		}
-		if isMatch {
+		if isSvcMatchPod(svc, pod) {
 			clusterIPs := util.ServiceClusterIPs(*svc)
 			protocolClusterIPs := getProtocolSvcIP(clusterIPs, protocol)
 			if len(protocolClusterIPs) != 0 {
@@ -628,19 +624,8 @@ func getProtocolSvcIP(clusterIPs []string, protocol string) []string {
 	return protocolClusterIPs
 }
 
-func isSvcMatchPod(svc *corev1.Service, pod *corev1.Pod) (bool, error) {
-	ss := metav1.SetAsLabelSelector(svc.Spec.Selector)
-	sel, err := metav1.LabelSelectorAsSelector(ss)
-	if err != nil {
-		return false, fmt.Errorf("error fetch label selector, %w", err)
-	}
-	if pod.Labels == nil {
-		return false, nil
-	}
-	if sel.Matches(labels.Set(pod.Labels)) {
-		return true, nil
-	}
-	return false, nil
+func isSvcMatchPod(svc *corev1.Service, pod *corev1.Pod) bool {
+	return labels.Set(svc.Spec.Selector).AsSelector().Matches(labels.Set(pod.Labels))
 }
 
 func (c *Controller) podMatchNetworkPolicies(pod *corev1.Pod) []string {
@@ -660,7 +645,7 @@ func (c *Controller) podMatchNetworkPolicies(pod *corev1.Pod) []string {
 
 	match := []string{}
 	for _, np := range nps {
-		if isPodMatchNetworkPolicy(pod, *podNs, np, np.Namespace) {
+		if isPodMatchNetworkPolicy(pod, podNs, np, np.Namespace) {
 			match = append(match, cache.MetaObjectToName(np).String())
 		}
 	}
@@ -688,7 +673,7 @@ func (c *Controller) svcMatchNetworkPolicies(svc *corev1.Service) ([]string, err
 			if match.Has(key) {
 				continue
 			}
-			if isPodMatchNetworkPolicy(pod, *ns, np, np.Namespace) {
+			if isPodMatchNetworkPolicy(pod, ns, np, np.Namespace) {
 				match.Insert(key)
 				klog.V(3).Infof("svc %s/%s match np %s", svc.Namespace, svc.Name, key)
 			}
@@ -697,11 +682,8 @@ func (c *Controller) svcMatchNetworkPolicies(svc *corev1.Service) ([]string, err
 	return match.UnsortedList(), nil
 }
 
-func isPodMatchNetworkPolicy(pod *corev1.Pod, podNs corev1.Namespace, policy *netv1.NetworkPolicy, policyNs string) bool {
+func isPodMatchNetworkPolicy(pod *corev1.Pod, podNs *corev1.Namespace, policy *netv1.NetworkPolicy, policyNs string) bool {
 	sel, _ := metav1.LabelSelectorAsSelector(&policy.Spec.PodSelector)
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
 	if podNs.Name == policyNs && sel.Matches(labels.Set(pod.Labels)) {
 		return true
 	}
@@ -722,7 +704,7 @@ func isPodMatchNetworkPolicy(pod *corev1.Pod, podNs corev1.Namespace, policy *ne
 	return false
 }
 
-func isPodMatchPolicyPeer(pod *corev1.Pod, podNs corev1.Namespace, policyPeer netv1.NetworkPolicyPeer, policyNs string) bool {
+func isPodMatchPolicyPeer(pod *corev1.Pod, podNs *corev1.Namespace, policyPeer netv1.NetworkPolicyPeer, policyNs string) bool {
 	if policyPeer.IPBlock != nil {
 		return false
 	}
@@ -730,25 +712,11 @@ func isPodMatchPolicyPeer(pod *corev1.Pod, podNs corev1.Namespace, policyPeer ne
 		if policyNs != podNs.Name {
 			return false
 		}
-	} else {
-		nsSel, _ := metav1.LabelSelectorAsSelector(policyPeer.NamespaceSelector)
-		if podNs.Labels == nil {
-			podNs.Labels = map[string]string{}
-		}
-		if !nsSel.Matches(labels.Set(podNs.Labels)) {
-			return false
-		}
+	} else if !util.ObjectMatchesLabelSelector(podNs, policyPeer.NamespaceSelector) {
+		return false
 	}
 
-	if policyPeer.PodSelector == nil {
-		return true
-	}
-
-	sel, _ := metav1.LabelSelectorAsSelector(policyPeer.PodSelector)
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	return sel.Matches(labels.Set(pod.Labels))
+	return policyPeer.PodSelector == nil || util.ObjectMatchesLabelSelector(pod, policyPeer.PodSelector)
 }
 
 func (c *Controller) namespaceMatchNetworkPolicies(ns *corev1.Namespace) []string {

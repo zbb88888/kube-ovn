@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -15,6 +17,7 @@ import (
 	"k8s.io/klog/v2"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/ovs"
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
@@ -62,7 +65,7 @@ func (c *Controller) handleUpdateEndpointSlice(key string) error {
 	defer func() { _ = c.epKeyMutex.UnlockKey(key) }()
 	klog.Infof("handle update endpointSlice for service %s", key)
 
-	endpointSlices, err := c.endpointSlicesLister.EndpointSlices(namespace).List(labels.Set(map[string]string{discoveryv1.LabelServiceName: name}).AsSelector())
+	endpointSlices, err := c.endpointSlicesLister.EndpointSlices(namespace).List(labels.Set{discoveryv1.LabelServiceName: name}.AsSelector())
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
@@ -82,7 +85,6 @@ func (c *Controller) handleUpdateEndpointSlice(key string) error {
 	svc := cachedService.DeepCopy()
 
 	var (
-		pods                     []*v1.Pod
 		lbVips                   []string
 		vip, vpcName, subnetName string
 		ok                       bool
@@ -120,11 +122,10 @@ func (c *Controller) handleUpdateEndpointSlice(key string) error {
 		}
 	}
 
-	if pods, err = c.podsLister.Pods(namespace).List(labels.Set(svc.Spec.Selector).AsSelector()); err != nil {
-		klog.Errorf("failed to get pods for service %s in namespace %s: %v", name, namespace, err)
+	vpcName, subnetName, err = c.getVpcAndSubnetForEndpoints(endpointSlices, svc)
+	if err != nil {
 		return err
 	}
-	vpcName, subnetName = c.getVpcSubnetName(pods, endpointSlices, svc)
 
 	var (
 		vpc    *kubeovnv1.Vpc
@@ -175,7 +176,7 @@ func (c *Controller) handleUpdateEndpointSlice(key string) error {
 				checkIP = util.MasqueradeCheckIP
 			}
 			isGenIPPortMapping := !ignoreHealthCheck || isPreferLocalBackend
-			ipPortMapping, backends = getIPPortMappingBackend(endpointSlices, port, lbVip, checkIP, isGenIPPortMapping)
+			ipPortMapping, backends = c.getIPPortMappingBackend(endpointSlices, port, lbVip, checkIP, isGenIPPortMapping)
 			// for performance reason delete lb with no backends
 			if len(backends) != 0 {
 				vip = util.JoinHostPort(lbVip, port.Port)
@@ -238,49 +239,127 @@ func (c *Controller) handleUpdateEndpointSlice(key string) error {
 	return nil
 }
 
-func (c *Controller) getVpcSubnetName(pods []*v1.Pod, endpointSlices []*discoveryv1.EndpointSlice, service *v1.Service) (string, string) {
-	var (
-		vpcName    string
-		subnetName string
-	)
+// serviceHasSelector returns if a service has selectors
+func serviceHasSelector(service *v1.Service) bool {
+	return len(service.Spec.Selector) > 0
+}
 
-	for _, pod := range pods {
-		if len(pod.Annotations) == 0 {
-			continue
+// getVpcAndSubnetForEndpoints returns the name of the VPC/Subnet for EndpointSlices
+func (c *Controller) getVpcAndSubnetForEndpoints(endpointSlices []*discoveryv1.EndpointSlice, service *v1.Service) (vpcName, subnetName string, err error) {
+	// Let the user self-determine what VPC and subnet to use if they provided annotations
+	if service.Annotations != nil {
+		if vpc := service.Annotations[util.LogicalRouterAnnotation]; vpc != "" {
+			vpcName = vpc
 		}
-		if subnetName == "" {
-			subnetName = pod.Annotations[util.LogicalSwitchAnnotation]
-		}
-
-	LOOP:
-		for _, endpointSlice := range endpointSlices {
-			for _, endpoint := range endpointSlice.Endpoints {
-				for _, addr := range endpoint.Addresses {
-					if addr == pod.Status.PodIP {
-						if vpcName == "" {
-							vpcName = pod.Annotations[util.LogicalRouterAnnotation]
-						}
-						if vpcName != "" {
-							break LOOP
-						}
-					}
-				}
-			}
+		if subnet := service.Annotations[util.LogicalSwitchAnnotation]; subnet != "" {
+			subnetName = subnet
 		}
 
 		if vpcName != "" && subnetName != "" {
-			break
+			return vpcName, subnetName, nil
 		}
 	}
 
-	if vpcName == "" {
+	// Choose the most optimized and straightforward way to retrieve the name of the VPC and subnet
+	if serviceHasSelector(service) {
+		// The service has a selector, which means that the EndpointSlices should have targets.
+		// We can use those targets instead of looking at every pod in the namespace.
+		vpcName, subnetName = c.findVpcAndSubnetWithTargets(endpointSlices)
+	} else {
+		// The service has no selectors, we must find which pods in the namespace of the service
+		// are targeted by the endpoint by only looking at the IPs.
+		pods, err := c.podsLister.Pods(service.Namespace).List(labels.Everything())
+		if err != nil {
+			err := fmt.Errorf("failed to get pods for service %s in namespace %s: %w", service.Name, service.Namespace, err)
+			klog.Error(err)
+			return "", "", err
+		}
+
+		vpcName, subnetName = c.findVpcAndSubnetWithNoTargets(endpointSlices, pods)
+	}
+
+	if vpcName == "" { // Default to what's on the service or to the default VPC
 		if vpcName = service.Annotations[util.VpcAnnotation]; vpcName == "" {
 			vpcName = c.config.ClusterRouter
 		}
 	}
 
-	if subnetName == "" {
+	if subnetName == "" { // Use the default subnet
 		subnetName = util.DefaultSubnet
+	}
+
+	return vpcName, subnetName, nil
+}
+
+// findVpcAndSubnetWithTargets returns the name of the VPC and Subnet for endpoints with targets
+func (c *Controller) findVpcAndSubnetWithTargets(endpointSlices []*discoveryv1.EndpointSlice) (vpcName, subnetName string) {
+	for _, slice := range endpointSlices {
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.TargetRef == nil {
+				continue
+			}
+
+			namespace, name := endpoint.TargetRef.Namespace, endpoint.TargetRef.Name
+			if name == "" || namespace == "" {
+				continue
+			}
+
+			pod, err := c.podsLister.Pods(namespace).Get(name)
+			if err != nil {
+				err := fmt.Errorf("couldn't retrieve pod %s/%s: %w", namespace, name, err)
+				klog.Error(err)
+				continue
+			}
+
+			vpc, subnet, err := c.getEndpointVpcAndSubnet(pod, endpoint.Addresses)
+			if err != nil {
+				err := fmt.Errorf("couldn't retrieve get subnet/vpc for pod %s/%s: %w", namespace, name, err)
+				klog.Error(err)
+				continue
+			}
+
+			if vpcName == "" {
+				vpcName = vpc
+			}
+
+			if subnetName == "" {
+				subnetName = subnet
+			}
+
+			if vpcName != "" && subnetName != "" {
+				return vpcName, subnetName
+			}
+		}
+	}
+
+	return vpcName, subnetName
+}
+
+// findVpcAndSubnetWithNoTargets returns the name of the VPC and Subnet for endpoints with no targets
+func (c *Controller) findVpcAndSubnetWithNoTargets(endpointSlices []*discoveryv1.EndpointSlice, pods []*v1.Pod) (vpcName, subnetName string) {
+	for _, slice := range endpointSlices {
+		for _, endpoint := range slice.Endpoints {
+			for _, pod := range pods {
+				vpc, subnet, err := c.getEndpointVpcAndSubnet(pod, endpoint.Addresses)
+				if err != nil {
+					err := fmt.Errorf("couldn't retrieve subnet/vpc for pod %s/%s: %w", pod.Namespace, pod.Name, err)
+					klog.Error(err)
+					continue
+				}
+
+				if vpcName == "" {
+					vpcName = vpc
+				}
+
+				if subnetName == "" {
+					subnetName = subnet
+				}
+
+				if vpcName != "" && subnetName != "" {
+					return vpcName, subnetName
+				}
+			}
+		}
 	}
 
 	return vpcName, subnetName
@@ -349,7 +428,7 @@ func (c *Controller) getHealthCheckVip(subnetName, lbVip string) (string, error)
 	return checkIP, nil
 }
 
-func getIPPortMappingBackend(endpointSlices []*discoveryv1.EndpointSlice, servicePort v1.ServicePort, serviceIP, checkVip string, isGenIPPortMapping bool) (map[string]string, []string) {
+func (c *Controller) getIPPortMappingBackend(endpointSlices []*discoveryv1.EndpointSlice, servicePort v1.ServicePort, serviceIP, checkVip string, isGenIPPortMapping bool) (map[string]string, []string) {
 	var (
 		ipPortMapping = map[string]string{}
 		backends      = []string{}
@@ -370,9 +449,22 @@ func getIPPortMappingBackend(endpointSlices []*discoveryv1.EndpointSlice, servic
 
 		for _, endpoint := range endpointSlice.Endpoints {
 			if isGenIPPortMapping && endpoint.TargetRef.Name != "" {
-				ipName := fmt.Sprintf("%s.%s", endpoint.TargetRef.Name, endpoint.TargetRef.Namespace)
+				pod, err := c.podsLister.Pods(endpoint.TargetRef.Namespace).Get(endpoint.TargetRef.Name)
+				if err != nil {
+					err := fmt.Errorf("failed to get pod %s/%s: %w", endpoint.TargetRef.Namespace, endpoint.TargetRef.Name, err)
+					klog.Error(err)
+					continue
+				}
+
+				lspName, err := c.getEndpointTargetLSPName(pod, endpoint.Addresses)
+				if err != nil {
+					err := fmt.Errorf("couldn't get LSP for the endpoint's target: %w", err)
+					klog.Error(err)
+					continue
+				}
+
 				for _, address := range endpoint.Addresses {
-					ipPortMapping[address] = fmt.Sprintf(util.HealthCheckNamedVipTemplate, ipName, checkVip)
+					ipPortMapping[address] = fmt.Sprintf(util.HealthCheckNamedVipTemplate, lspName, checkVip)
 				}
 			}
 		}
@@ -395,4 +487,140 @@ func getIPPortMappingBackend(endpointSlices []*discoveryv1.EndpointSlice, servic
 
 func endpointReady(endpoint discoveryv1.Endpoint) bool {
 	return endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready
+}
+
+// getPodProviders returns all the providers available on a pod
+func (c *Controller) getPodProviders(pod *v1.Pod) ([]string, error) {
+	// Get all the networks to which the pod is attached
+	podNetworks, err := c.getPodKubeovnNets(pod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pod networks: %w", err)
+	}
+
+	// Retrieve all the providers
+	var providers []string
+	for _, podNetwork := range podNetworks {
+		providers = append(providers, podNetwork.ProviderName)
+	}
+
+	return providers, nil
+}
+
+// getMatchingProviderForAddress returns the provider linked to a subnet in which a particular address is present
+func getMatchingProviderForAddress(pod *v1.Pod, providers []string, address string) string {
+	if pod.Annotations == nil {
+		return ""
+	}
+
+	// Find which provider is linked to this address
+	for _, provider := range providers {
+		ipsForProvider, exists := pod.Annotations[fmt.Sprintf(util.IPAddressAnnotationTemplate, provider)]
+		if !exists {
+			continue
+		}
+
+		ips := strings.Split(ipsForProvider, ",")
+		if slices.Contains(ips, address) {
+			return provider
+		}
+	}
+
+	return ""
+}
+
+// getEndpointProvider returns the provider linked to the addresses of an endpoint
+func (c *Controller) getEndpointProvider(pod *v1.Pod, addresses []string) (string, error) {
+	// Retrieve all the providers of the pod
+	providers, err := c.getPodProviders(pod)
+	if err != nil {
+		return "", err
+	}
+
+	// Get the first matching provider for any of the address in the endpoint
+	var provider string
+	for _, address := range addresses {
+		if provider = getMatchingProviderForAddress(pod, providers, address); provider != "" {
+			return provider, nil
+		}
+	}
+
+	return "", nil
+}
+
+// getEndpointTargetLSPNameFromProvider returns the name of the LSP for a pod targeted by an endpoint.
+// A custom provider can be specified if the LSP is within a subnet that doesn't use
+// the default "ovn" provider.
+func getEndpointTargetLSPNameFromProvider(pod *v1.Pod, provider string) string {
+	// If no provider is specified, use the default one
+	if provider == "" {
+		provider = util.OvnProvider
+	}
+
+	target := pod.Name
+
+	// If this pod is a VM launcher pod, we need to retrieve the name of the VM. This is necessary
+	// because we do not use the same syntax for the LSP of normal pods and for VM pods
+	if vmName, exists := pod.Annotations[fmt.Sprintf(util.VMAnnotationTemplate, provider)]; exists {
+		target = vmName
+	}
+
+	return ovs.PodNameToPortName(target, pod.Namespace, provider)
+}
+
+// getEndpointTargetLSP returns the name of the LSP on which addresses are attached for a specific pod
+func (c *Controller) getEndpointTargetLSPName(pod *v1.Pod, addresses []string) (string, error) {
+	// Retrieve the provider for those addresses
+	provider, err := c.getEndpointProvider(pod, addresses)
+	if err != nil {
+		return "", err
+	}
+
+	return getEndpointTargetLSPNameFromProvider(pod, provider), nil
+}
+
+// getSubnetByProvider returns the subnet linked to a provider on a pod
+func (c *Controller) getSubnetByProvider(pod *v1.Pod, provider string) (string, error) {
+	subnetName, exists := pod.Annotations[fmt.Sprintf(util.LogicalSwitchAnnotationTemplate, provider)]
+	if !exists {
+		return "", fmt.Errorf("couldn't find subnet linked to provider %s", provider)
+	}
+
+	return subnetName, nil
+}
+
+// getVpcByProvider returns the VPC linked to a provider on a pod
+func (c *Controller) getVpcByProvider(pod *v1.Pod, provider string) (string, error) {
+	vpcName, exists := pod.Annotations[fmt.Sprintf(util.LogicalRouterAnnotationTemplate, provider)]
+	if !exists {
+		return "", fmt.Errorf("couldn't find vpc linked to provider %s", provider)
+	}
+
+	return vpcName, nil
+}
+
+// getEndpointVpcAndSubnet returns the VPC/subnet for a pod and a set of addresses attached to it
+func (c *Controller) getEndpointVpcAndSubnet(pod *v1.Pod, addresses []string) (string, string, error) {
+	// Retrieve the provider for those addresses
+	provider, err := c.getEndpointProvider(pod, addresses)
+	if err != nil {
+		return "", "", err
+	}
+
+	if provider == "" {
+		return "", "", nil
+	}
+
+	// Retrieve the subnet
+	subnet, err := c.getSubnetByProvider(pod, provider)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Retrieve the VPC
+	vpc, err := c.getVpcByProvider(pod, provider)
+	if err != nil {
+		return "", "", err
+	}
+
+	return vpc, subnet, nil
 }

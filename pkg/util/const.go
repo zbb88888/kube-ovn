@@ -214,14 +214,16 @@ const (
 	OvnFip      = "ovn"
 	IptablesFip = "iptables"
 
-	U2OSubnetPolicyPriority         = 29400
-	GatewayRouterPolicyPriority     = 29000
-	EgressGatewayPolicyPriority     = 29100
-	NorthGatewayRoutePolicyPriority = 29250
-	OvnICPolicyPriority             = 29500
-	NodeRouterPolicyPriority        = 30000
-	NodeLocalDNSPolicyPriority      = 30100
-	SubnetRouterPolicyPriority      = 31000
+	GatewayRouterPolicyPriority      = 29000
+	EgressGatewayDropPolicyPriority  = 29090
+	EgressGatewayPolicyPriority      = 29100
+	EgressGatewayLocalPolicyPriority = 29150
+	NorthGatewayRoutePolicyPriority  = 29250
+	U2OSubnetPolicyPriority          = 29400
+	OvnICPolicyPriority              = 29500
+	NodeRouterPolicyPriority         = 30000
+	NodeLocalDNSPolicyPriority       = 30100
+	SubnetRouterPolicyPriority       = 31000
 
 	OffloadType  = "offload-port"
 	InternalType = "internal-port"
@@ -328,9 +330,13 @@ const (
 	SignerName = "kubeovn.io/signer"
 
 	UnderlaySvcLocalOpenFlowPriority = 10000
+	U2OKeepSrcMacPriority            = 10001
+
 	UnderlaySvcLocalOpenFlowCookieV4 = 0x1000
 	UnderlaySvcLocalOpenFlowCookieV6 = 0x1001
 
 	MasqueradeExternalLBAccessMac = "00:00:00:01:00:01"
 	MasqueradeCheckIP             = "0.0.0.0"
 )
+
+var KubeVirtCRD = []string{"virtualmachineinstancemigrations.kubevirt.io", "virtualmachines.kubevirt.io"}

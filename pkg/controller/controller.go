@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v3"
+	netAttach "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/informers/externalversions"
+	netAttachv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,14 +77,15 @@ type Controller struct {
 	podsSynced             cache.InformerSynced
 	addOrUpdatePodQueue    workqueue.TypedRateLimitingInterface[string]
 	deletePodQueue         workqueue.TypedRateLimitingInterface[string]
-	deletingPodObjMap      *xsync.MapOf[string, *corev1.Pod]
-	deletingNodeObjMap     *xsync.MapOf[string, *corev1.Node]
+	deletingPodObjMap      *xsync.Map[string, *corev1.Pod]
+	deletingNodeObjMap     *xsync.Map[string, *corev1.Node]
 	updatePodSecurityQueue workqueue.TypedRateLimitingInterface[string]
 	podKeyMutex            keymutex.KeyMutex
 
 	vpcsLister           kubeovnlister.VpcLister
 	vpcSynced            cache.InformerSynced
 	addOrUpdateVpcQueue  workqueue.TypedRateLimitingInterface[string]
+	vpcLastPoliciesMap   *xsync.Map[string, string]
 	delVpcQueue          workqueue.TypedRateLimitingInterface[*kubeovnv1.Vpc]
 	updateVpcStatusQueue workqueue.TypedRateLimitingInterface[string]
 	vpcKeyMutex          keymutex.KeyMutex
@@ -119,6 +122,7 @@ type Controller struct {
 	subnetsLister           kubeovnlister.SubnetLister
 	subnetSynced            cache.InformerSynced
 	addOrUpdateSubnetQueue  workqueue.TypedRateLimitingInterface[string]
+	subnetLastVpcNameMap    *xsync.Map[string, string]
 	deleteSubnetQueue       workqueue.TypedRateLimitingInterface[*kubeovnv1.Subnet]
 	updateSubnetStatusQueue workqueue.TypedRateLimitingInterface[string]
 	syncVirtualPortsQueue   workqueue.TypedRateLimitingInterface[string]
@@ -271,9 +275,13 @@ type Controller struct {
 	csrSynced           cache.InformerSynced
 	addOrUpdateCsrQueue workqueue.TypedRateLimitingInterface[string]
 
-	vmiMigrationSynced           cache.InformerSynced
 	addOrUpdateVMIMigrationQueue workqueue.TypedRateLimitingInterface[string]
+	deleteVMQueue                workqueue.TypedRateLimitingInterface[string]
 	kubevirtInformerFactory      informer.KubeVirtInformerFactory
+
+	netAttachLister          netAttachv1.NetworkAttachmentDefinitionLister
+	netAttachSynced          cache.InformerSynced
+	netAttachInformerFactory netAttach.SharedInformerFactory
 
 	recorder               record.EventRecorder
 	informerFactory        kubeinformers.SharedInformerFactory
@@ -281,6 +289,9 @@ type Controller struct {
 	deployInformerFactory  kubeinformers.SharedInformerFactory
 	kubeovnInformerFactory kubeovninformer.SharedInformerFactory
 	anpInformerFactory     anpinformer.SharedInformerFactory
+
+	// Database health check
+	dbFailureCount int
 }
 
 func newTypedRateLimitingQueue[T comparable](name string, rateLimiter workqueue.TypedRateLimiter[T]) workqueue.TypedRateLimitingInterface[T] {
@@ -330,6 +341,12 @@ func Run(ctx context.Context, config *Configuration) {
 			listOption.AllowWatchBookmarks = true
 		}))
 
+	attachNetInformerFactory := netAttach.NewSharedInformerFactoryWithOptions(config.AttachNetClient, 0,
+		netAttach.WithTweakListOptions(func(listOption *metav1.ListOptions) {
+			listOption.AllowWatchBookmarks = true
+		}),
+	)
+
 	kubevirtInformerFactory := informer.NewKubeVirtInformerFactory(config.KubevirtClient.RestClient(), config.KubevirtClient, nil, util.KubevirtNamespace)
 
 	vpcInformer := kubeovnInformerFactory.Kubeovn().V1().Vpcs()
@@ -364,19 +381,20 @@ func Run(ctx context.Context, config *Configuration) {
 	anpInformer := anpInformerFactory.Policy().V1alpha1().AdminNetworkPolicies()
 	banpInformer := anpInformerFactory.Policy().V1alpha1().BaselineAdminNetworkPolicies()
 	csrInformer := informerFactory.Certificates().V1().CertificateSigningRequests()
-	vmiMigrationInformer := kubevirtInformerFactory.VirtualMachineInstanceMigration()
+	netAttachInformer := attachNetInformerFactory.K8sCniCncfIo().V1().NetworkAttachmentDefinitions()
 
 	numKeyLocks := max(runtime.NumCPU()*2, config.WorkerNum*2)
 	controller := &Controller{
 		config:             config,
-		deletingPodObjMap:  xsync.NewMapOf[string, *corev1.Pod](),
-		deletingNodeObjMap: xsync.NewMapOf[string, *corev1.Node](),
+		deletingPodObjMap:  xsync.NewMap[string, *corev1.Pod](),
+		deletingNodeObjMap: xsync.NewMap[string, *corev1.Node](),
 		ipam:               ovnipam.NewIPAM(),
 		namedPort:          NewNamedPort(),
 
 		vpcsLister:           vpcInformer.Lister(),
 		vpcSynced:            vpcInformer.Informer().HasSynced,
 		addOrUpdateVpcQueue:  newTypedRateLimitingQueue[string]("AddOrUpdateVpc", nil),
+		vpcLastPoliciesMap:   xsync.NewMap[string, string](),
 		delVpcQueue:          newTypedRateLimitingQueue[*kubeovnv1.Vpc]("DeleteVpc", nil),
 		updateVpcStatusQueue: newTypedRateLimitingQueue[string]("UpdateVpcStatus", nil),
 		vpcKeyMutex:          keymutex.NewHashed(numKeyLocks),
@@ -402,6 +420,7 @@ func Run(ctx context.Context, config *Configuration) {
 		subnetsLister:           subnetInformer.Lister(),
 		subnetSynced:            subnetInformer.Informer().HasSynced,
 		addOrUpdateSubnetQueue:  newTypedRateLimitingQueue[string]("AddSubnet", nil),
+		subnetLastVpcNameMap:    xsync.NewMap[string, string](),
 		deleteSubnetQueue:       newTypedRateLimitingQueue[*kubeovnv1.Subnet]("DeleteSubnet", nil),
 		updateSubnetStatusQueue: newTypedRateLimitingQueue[string]("UpdateSubnetStatus", nil),
 		syncVirtualPortsQueue:   newTypedRateLimitingQueue[string]("SyncVirtualPort", nil),
@@ -547,9 +566,13 @@ func Run(ctx context.Context, config *Configuration) {
 		csrSynced:           csrInformer.Informer().HasSynced,
 		addOrUpdateCsrQueue: newTypedRateLimitingQueue[string]("AddOrUpdateCSR", custCrdRateLimiter),
 
-		vmiMigrationSynced:           vmiMigrationInformer.HasSynced,
 		addOrUpdateVMIMigrationQueue: newTypedRateLimitingQueue[string]("AddOrUpdateVMIMigration", nil),
+		deleteVMQueue:                newTypedRateLimitingQueue[string]("DeleteVM", nil),
 		kubevirtInformerFactory:      kubevirtInformerFactory,
+
+		netAttachLister:          netAttachInformer.Lister(),
+		netAttachSynced:          netAttachInformer.Informer().HasSynced,
+		netAttachInformerFactory: attachNetInformerFactory,
 
 		recorder:               recorder,
 		informerFactory:        informerFactory,
@@ -635,6 +658,8 @@ func Run(ctx context.Context, config *Configuration) {
 	controller.deployInformerFactory.Start(ctx.Done())
 	controller.kubeovnInformerFactory.Start(ctx.Done())
 	controller.anpInformerFactory.Start(ctx.Done())
+	controller.StartKubevirtInformerFactory(ctx, kubevirtInformerFactory)
+	controller.StartNetAttachInformerFactory(ctx)
 
 	klog.Info("Waiting for informer caches to sync")
 	cacheSyncs := []cache.InformerSynced{
@@ -910,16 +935,6 @@ func Run(ctx context.Context, config *Configuration) {
 		}
 	}
 
-	if config.EnableLiveMigrationOptimize {
-		if _, err = vmiMigrationInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    controller.enqueueAddVMIMigration,
-			UpdateFunc: controller.enqueueUpdateVMIMigration,
-		}); err != nil {
-			util.LogFatalAndExit(err, "failed to add VMI Migration event handler")
-		}
-		controller.StartMigrationInformerFactory(ctx, kubevirtInformerFactory)
-	}
-
 	controller.Run(ctx)
 }
 
@@ -979,7 +994,7 @@ func (c *Controller) Run(ctx context.Context) {
 		util.LogFatalAndExit(err, "failed to sync crd vlans")
 	}
 
-	if c.config.EnableOVNIPSec {
+	if c.config.EnableOVNIPSec && !c.config.CertManagerIPSecCert {
 		if err := c.InitDefaultOVNIPsecCA(); err != nil {
 			util.LogFatalAndExit(err, "failed to init ovn ipsec CA")
 		}
@@ -991,6 +1006,48 @@ func (c *Controller) Run(ctx context.Context) {
 	c.initResourceOnce()
 	<-ctx.Done()
 	klog.Info("Shutting down workers")
+}
+
+func (c *Controller) dbStatus() {
+	const maxFailures = 5
+
+	done := make(chan error, 2)
+	go func() {
+		done <- c.OVNNbClient.Echo(context.Background())
+	}()
+	go func() {
+		done <- c.OVNSbClient.Echo(context.Background())
+	}()
+
+	resultsReceived := 0
+	timeout := time.After(time.Duration(c.config.OvnTimeout) * time.Second)
+
+	for resultsReceived < 2 {
+		select {
+		case err := <-done:
+			resultsReceived++
+			if err != nil {
+				c.dbFailureCount++
+				klog.Errorf("OVN database echo failed (%d/%d): %v", c.dbFailureCount, maxFailures, err)
+				if c.dbFailureCount >= maxFailures {
+					util.LogFatalAndExit(err, "OVN database connection failed after %d attempts", maxFailures)
+				}
+				return
+			}
+		case <-timeout:
+			c.dbFailureCount++
+			klog.Errorf("OVN database echo timeout (%d/%d) after %ds", c.dbFailureCount, maxFailures, c.config.OvnTimeout)
+			if c.dbFailureCount >= maxFailures {
+				util.LogFatalAndExit(nil, "OVN database connection timeout after %d attempts", maxFailures)
+			}
+			return
+		}
+	}
+
+	if c.dbFailureCount > 0 {
+		klog.Infof("OVN database connection recovered after %d failures", c.dbFailureCount)
+		c.dbFailureCount = 0
+	}
 }
 
 func (c *Controller) shutdown() {
@@ -1283,9 +1340,7 @@ func (c *Controller) startWorkers(ctx context.Context) {
 	go wait.Until(runWorker("update ovn dnat", c.updateOvnDnatRuleQueue, c.handleUpdateOvnDnatRule), time.Second, ctx.Done())
 	go wait.Until(runWorker("delete ovn dnat", c.delOvnDnatRuleQueue, c.handleDelOvnDnatRule), time.Second, ctx.Done())
 
-	if c.config.EnableNP {
-		go wait.Until(c.CheckNodePortGroup, time.Duration(c.config.NodePgProbeTime)*time.Minute, ctx.Done())
-	}
+	go wait.Until(c.CheckNodePortGroup, time.Duration(c.config.NodePgProbeTime)*time.Minute, ctx.Done())
 
 	go wait.Until(runWorker("add ip", c.addIPQueue, c.handleAddReservedIP), time.Second, ctx.Done())
 	go wait.Until(runWorker("update ip", c.updateIPQueue, c.handleUpdateIP), time.Second, ctx.Done())
@@ -1330,6 +1385,10 @@ func (c *Controller) startWorkers(ctx context.Context) {
 	if c.config.EnableLiveMigrationOptimize {
 		go wait.Until(runWorker("add/update vmiMigration ", c.addOrUpdateVMIMigrationQueue, c.handleAddOrUpdateVMIMigration), 50*time.Millisecond, ctx.Done())
 	}
+
+	go wait.Until(runWorker("delete vm", c.deleteVMQueue, c.handleDeleteVM), time.Second, ctx.Done())
+
+	go wait.Until(c.dbStatus, 15*time.Second, ctx.Done())
 }
 
 func (c *Controller) allSubnetReady(subnets ...string) (bool, error) {

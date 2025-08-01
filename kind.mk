@@ -9,6 +9,9 @@ OS_LINUX = 1
 endif
 endif
 
+# renovate: datasource=docker depName=kindest/node packageName=kindest/node versioning=semver
+K8S_VERSION = v1.33.2
+
 KIND_NETWORK_UNDERLAY = $(shell echo $${KIND_NETWORK_UNDERLAY:-kind})
 UNDERLAY_NETWORK_VAR_PREFIX = DOCKER_NETWORK_$(shell echo $(KIND_NETWORK_UNDERLAY) | tr '[:lower:]-' '[:upper:]_')
 UNDERLAY_NETWORK_IPV4_SUBNET = $(UNDERLAY_NETWORK_VAR_PREFIX)_IPV4_SUBNET
@@ -24,7 +27,7 @@ KIND_VLAN_NIC = eth1
 endif
 
 KIND_AUDITING = $(shell echo $${KIND_AUDITING:-false})
-ifeq ($(shell echo $${CI:-false}),true)
+ifeq ($(or $(CI),false),true)
 KIND_AUDITING = true
 endif
 
@@ -103,7 +106,7 @@ kind-iptables-accepct-underlay:
 
 .PHONY: kind-generate-config
 kind-generate-config:
-	jinjanate yamls/kind.yaml.j2 -o yamls/kind.yaml
+	k8s_version=$(K8S_VERSION) jinjanate yamls/kind.yaml.j2 -o yamls/kind.yaml
 
 .PHONY: kind-disable-hairpin
 kind-disable-hairpin:
@@ -456,6 +459,7 @@ kind-install-underlay-logical-gateway-dual: kind-disable-hairpin kind-load-image
 kind-install-multus:
 	$(call kind_load_image,kube-ovn,$(MULTUS_IMAGE),1)
 	curl -s "$(MULTUS_YAML)" | sed 's/:snapshot-thick/:$(MULTUS_VERSION)-thick/g' | kubectl apply -f -
+	kubectl -n kube-system set resources ds/kube-multus-ds -c kube-multus --limits=cpu=200m,memory=200Mi
 	kubectl -n kube-system rollout status ds kube-multus-ds
 
 .PHONY: kind-install-metallb
@@ -467,7 +471,7 @@ kind-install-metallb:
 	helm repo add metallb $(METALLB_CHART_REPO)
 	helm repo update metallb
 	helm install metallb metallb/metallb --wait \
-		--version $(METALLB_VERSION) \
+		--version $(METALLB_VERSION:v%=%) \
 		--namespace metallb-system \
 		--create-namespace \
 		--set speaker.frr.image.tag=$(FRR_VERSION)
@@ -537,17 +541,19 @@ kind-install-cilium-chaining: kind-install-cilium-chaining-ipv4
 .PHONY: kind-install-cilium-chaining-%
 kind-install-cilium-chaining-%:
 	$(eval KUBERNETES_SERVICE_HOST = $(shell kubectl get nodes kube-ovn-control-plane -o jsonpath='{.status.addresses[0].address}'))
-	$(call kind_load_image,kube-ovn,$(CILIUM_IMAGE_REPO)/cilium:v$(CILIUM_VERSION),1)
-	$(call kind_load_image,kube-ovn,$(CILIUM_IMAGE_REPO)/operator-generic:v$(CILIUM_VERSION),1)
+	$(call kind_load_image,kube-ovn,$(CILIUM_IMAGE_REPO)/cilium:$(CILIUM_VERSION),1)
+	$(call kind_load_image,kube-ovn,$(CILIUM_IMAGE_REPO)/operator-generic:$(CILIUM_VERSION),1)
 	kubectl apply -f yamls/cilium-chaining.yaml
 	helm repo add cilium https://helm.cilium.io/
 	helm repo update cilium
 	helm install cilium cilium/cilium --wait \
-		--version $(CILIUM_VERSION) \
+		--version $(CILIUM_VERSION:v%=%) \
 		--namespace kube-system \
 		--set k8sServiceHost=$(KUBERNETES_SERVICE_HOST) \
 		--set k8sServicePort=6443 \
 		--set kubeProxyReplacement=false \
+		--set image.useDigest=false \
+		--set operator.image.useDigest=false \
 		--set operator.replicas=1 \
 		--set socketLB.enabled=true \
 		--set nodePort.enabled=true \
@@ -557,6 +563,7 @@ kind-install-cilium-chaining-%:
 		--set enableIPv4Masquerade=false \
 		--set enableIPv6Masquerade=false \
 		--set hubble.enabled=true \
+		--set envoy.enabled=false \
 		--set sctp.enabled=true \
 		--set ipv4.enabled=$(shell if echo $* | grep -q ipv6; then echo false; else echo true; fi) \
 		--set ipv6.enabled=$(shell if echo $* | grep -q ipv4; then echo false; else echo true; fi) \
@@ -650,6 +657,30 @@ kind-install-kwok:
 kind-install-ovn-ipsec:
 	@$(MAKE) ENABLE_OVN_IPSEC=true kind-install
 
+.PHONY: kind-install-cert-manager
+kind-install-cert-manager:
+	$(call kind_load_image,kube-ovn,$(CERT_MANAGER_CONTROLLER),1)
+	$(call kind_load_image,kube-ovn,$(CERT_MANAGER_CAINJECTOR),1)
+	$(call kind_load_image,kube-ovn,$(CERT_MANAGER_WEBHOOK),1)
+
+	kubectl apply -f "$(CERT_MANAGER_YAML)"
+
+	kubectl rollout status deployment/cert-manager -n cert-manager --timeout 120s
+	kubectl rollout status deployment/cert-manager-cainjector -n cert-manager --timeout 120s
+	kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout 120s
+
+.PHONY: kind-install-ovn-ipsec-cert-manager
+kind-install-ovn-ipsec-cert-manager:
+	@$(MAKE) CERT_MANAGER_IPSEC_CERT=true kind-install-ovn-ipsec
+	@$(MAKE) kind-install-cert-manager
+
+	docker run --rm -v "$(CURDIR)":/etc/ovn $(REGISTRY)/kube-ovn:$(VERSION) bash generate-ssl.sh
+
+	kubectl create secret generic -n cert-manager kube-ovn-ca --from-file=tls.key=cakey.pem --from-file=tls.crt=cacert.pem
+	kubectl create secret generic -n kube-system ovn-ipsec-ca --from-file=cacert=cacert.pem
+	echo '{"apiVersion": "cert-manager.io/v1", "kind": "ClusterIssuer", "metadata": {"name": "kube-ovn"}, "spec": {"ca": {"secretName": "kube-ovn-ca"}}}' | \
+		kubectl apply -f -
+
 .PHONY: kind-install-anp
 kind-install-anp: kind-load-image
 	$(call kind_load_image,kube-ovn,$(ANP_TEST_IMAGE),1)
@@ -707,3 +738,9 @@ kind-clean-bgp-ha:
 		-v $(CURDIR)/yamls/clab-bgp-ha.yaml:/clab-bgp/clab.yaml \
 		$(CLAB_IMAGE) clab destroy -t /clab-bgp/clab.yaml
 	@$(MAKE) kind-clean
+
+.PHONY: kind-ghcr-pull
+kind-ghcr-pull:
+	echo $${GHCR_TOKEN} | docker login ghcr.io -u github-actions --password-stdin
+	docker pull ghcr.io/kubeovn/kindest-node:$(K8S_VERSION)
+	docker tag ghcr.io/kubeovn/kindest-node:$(K8S_VERSION) kindest/node:$(K8S_VERSION)

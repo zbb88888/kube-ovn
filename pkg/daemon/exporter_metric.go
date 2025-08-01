@@ -14,6 +14,9 @@ import (
 func (c *Controller) setIPLocalPortRangeMetric() {
 	output, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range")
 	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		klog.Errorf("failed to get value of ip_local_port_range, err %v", err)
 		return
 	}
@@ -58,8 +61,11 @@ func (c *Controller) setCheckSumErrMetric() {
 }
 
 func (c *Controller) setDNSSearchMetric() {
-	file, err := resolvconf.Get()
+	file, err := resolvconf.GetSpecific("/etc/resolv.conf")
 	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		klog.Errorf("failed to get /etc/resolv.conf content: %v", err)
 		return
 	}
@@ -67,7 +73,8 @@ func (c *Controller) setDNSSearchMetric() {
 
 	found := false
 	for _, domain := range domains {
-		if strings.Contains(domain, "local") {
+		if domain == "." {
+			// Ignore the root domain
 			continue
 		}
 
@@ -138,6 +145,9 @@ func (c *Controller) setBridgeNfCallIptablesMetric() {
 func (c *Controller) setIPv6RouteMaxsizeMetric() {
 	output, err := os.ReadFile("/proc/sys/net/ipv6/route/max_size")
 	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
 		klog.Errorf("failed to get value of  ipv6 route max_size, err %v", err)
 		return
 	}

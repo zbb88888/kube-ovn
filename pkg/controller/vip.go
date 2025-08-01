@@ -273,16 +273,20 @@ func (c *Controller) handleUpdateVirtualParents(key string) error {
 	}
 
 	// vip cloud use selector to select pods as its virtual parents
-	selectors := make(map[string]string)
+	matchLabels := make(map[string]string)
 	for _, v := range cachedVip.Spec.Selector {
 		parts := strings.Split(strings.TrimSpace(v), ":")
 		if len(parts) != 2 {
 			continue
 		}
-		selectors[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		matchLabels[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
-	sel, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: selectors})
-	pods, err := c.podsLister.Pods(cachedVip.Spec.Namespace).List(sel)
+	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: matchLabels})
+	if err != nil {
+		klog.Errorf("failed to convert label selector %v: %v", matchLabels, err)
+		return err
+	}
+	pods, err := c.podsLister.Pods(cachedVip.Spec.Namespace).List(selector)
 	if err != nil {
 		klog.Errorf("failed to list pods that meet selector requirements, %v", err)
 		return err
@@ -297,13 +301,14 @@ func (c *Controller) handleUpdateVirtualParents(key string) error {
 		if aaps := strings.Split(pod.Annotations[util.AAPsAnnotation], ","); !slices.Contains(aaps, cachedVip.Name) {
 			continue
 		}
+		podName := c.getNameByPod(pod)
 		podNets, err := c.getPodKubeovnNets(pod)
 		if err != nil {
 			klog.Errorf("failed to get pod nets %v", err)
 		}
 		for _, podNet := range podNets {
 			if podNet.Subnet.Name == cachedVip.Spec.Subnet {
-				portName := ovs.PodNameToPortName(pod.Name, pod.Namespace, podNet.ProviderName)
+				portName := ovs.PodNameToPortName(podName, pod.Namespace, podNet.ProviderName)
 				virtualParents = append(virtualParents, portName)
 				key := cache.MetaObjectToName(pod).String()
 				klog.Infof("enqueue update pod security for %s", key)
@@ -428,9 +433,9 @@ func (c *Controller) patchVipStatus(key, v4ip string, ready bool) error {
 	return nil
 }
 
-func (c *Controller) podReuseVip(key, portName string, keepVIP bool) error {
+func (c *Controller) podReuseVip(vipName, portName string, keepVIP bool) error {
 	// when pod use static vip, label vip reserved for pod
-	oriVip, err := c.virtualIpsLister.Get(key)
+	oriVip, err := c.virtualIpsLister.Get(vipName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			return nil
@@ -456,7 +461,7 @@ func (c *Controller) podReuseVip(key, portName string, keepVIP bool) error {
 		klog.Errorf("failed to patch label for vip '%s', %v", vip.Name, err)
 		return err
 	}
-	c.ipam.ReleaseAddressByPod(key, vip.Spec.Subnet)
+	c.ipam.ReleaseAddressByPod(vipName, vip.Spec.Subnet)
 	c.updateSubnetStatusQueue.Add(vip.Spec.Subnet)
 	return nil
 }

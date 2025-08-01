@@ -45,6 +45,12 @@ type Configuration struct {
 	EnableMetrics                   bool
 	SecureServing                   bool
 	MetricsPort                     int32
+	LogPerm                         string
+
+	// TLS configuration for secure serving
+	TLSMinVersion   string
+	TLSMaxVersion   string
+	TLSCipherSuites []string
 }
 
 // ParseFlags get parameters information.
@@ -88,6 +94,12 @@ func ParseFlags() (*Configuration, error) {
 		argServiceVswitchdFilePidPath = pflag.String("service.vswitchd.file.pid.path", "/var/run/openvswitch/ovs-vswitchd.pid", "OVS vswitchd daemon process id file.")
 		argServiceNorthdFileLogPath   = pflag.String("service.ovn.northd.file.log.path", "/var/log/ovn/ovn-northd.log", "OVN northd daemon log file.")
 		argServiceNorthdFilePidPath   = pflag.String("service.ovn.northd.file.pid.path", "/var/run/ovn/ovn-northd.pid", "OVN northd daemon process id file.")
+
+		argLogPerm = pflag.String("log-perm", "640", "The permission for the log file")
+
+		argTLSMinVersion   = pflag.String("tls-min-version", "", "The minimum TLS version to use for secure serving. Supported values: TLS10, TLS11, TLS12, TLS13. If not set, the default is used based on the Go version.")
+		argTLSMaxVersion   = pflag.String("tls-max-version", "", "The maximum TLS version to use for secure serving. Supported values: TLS10, TLS11, TLS12, TLS13. If not set, the default is used based on the Go version.")
+		argTLSCipherSuites = pflag.StringSlice("tls-cipher-suites", nil, "Comma-separated list of TLS cipher suite names to use for secure serving (e.g., 'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384'). Names must match Go's crypto/tls package. See Go documentation for available suites. If not set, defaults are used. Users are responsible for selecting secure cipher suites.")
 	)
 
 	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
@@ -144,6 +156,10 @@ func ParseFlags() (*Configuration, error) {
 		EnableMetrics:                   *argEnableMetrics,
 		SecureServing:                   *argSecureServing,
 		MetricsPort:                     *argMetricsPort,
+		LogPerm:                         *argLogPerm,
+		TLSMinVersion:                   *argTLSMinVersion,
+		TLSMaxVersion:                   *argTLSMaxVersion,
+		TLSCipherSuites:                 *argTLSCipherSuites,
 	}
 
 	klog.Infof("ovn monitor config is %+v", config)

@@ -85,7 +85,7 @@ if [ "$current_branch" != "master" ]; then
 
   echo "Modify the doc version number"
   cd ${DOCS_DIR}
-  git checkout $(cat VERSION | awk -F '.' '{print $1"."$2}')
+  git checkout $(echo $VERSION | awk -F '.' '{print $1"."$2}')
   git pull
   sed -i "s/version: .*/version: ${VERSION}/" mkdocs.yml
   git add mkdocs.yml
@@ -93,7 +93,18 @@ if [ "$current_branch" != "master" ]; then
   git push
 
   echo "clean up images"
-  docker rmi kubeovn/kube-ovn:${VERSION}-x86 kubeovn/kube-ovn:${VERSION}-arm kubeovn/vpc-nat-gateway:${VERSION}-x86 kubeovn/vpc-nat-gateway:${VERSION}-arm kubeovn/kube-ovn:${VERSION}-debug-x86 kubeovn/kube-ovn:${VERSION}-debug-arm
+  docker rmi kubeovn/kube-ovn:${VERSION}-x86 \
+    kubeovn/kube-ovn:${VERSION}-arm \
+    kubeovn/vpc-nat-gateway:${VERSION}-x86 \
+    kubeovn/vpc-nat-gateway:${VERSION}-arm \
+    kubeovn/kube-ovn:${VERSION}-debug-x86 \
+    kubeovn/kube-ovn:${VERSION}-debug-arm \
+    kubeovn/kube-ovn-base:${VERSION}-amd64 \
+    kubeovn/kube-ovn-base:${VERSION}-arm64 \
+    kubeovn/kube-ovn-base:${VERSION}-amd64-legacy \
+    kubeovn/kube-ovn-base:${VERSION}-dpdk \
+    kubeovn/kube-ovn-base:${VERSION}-debug-amd64 \
+    kubeovn/kube-ovn-base:${VERSION}-debug-arm64
 
   echo "Manually update the release note with the new changelog"
 else
@@ -103,7 +114,7 @@ else
   RELEASE_BRANCH=release-$(echo ${VERSION} | sed 's/v\([0-9]*\.[0-9]*\).*/\1/')
   git push origin --tags
   git checkout -b $RELEASE_BRANCH
-  git push origin $RELEASE_BRANCH
+  git push --set-upstream origin $RELEASE_BRANCH
 
   echo "create and push base images for the master branch"
   git checkout master

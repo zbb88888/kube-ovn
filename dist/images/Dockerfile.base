@@ -1,5 +1,34 @@
 # syntax = docker/dockerfile:experimental
-ARG GO_VERSION=1.24.3
+# renovate: datasource=golang-version depName=go
+ARG GO_VERSION=1.24.5
+
+FROM ubuntu:24.04 AS openssl-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    sed -i 's/^Types: deb$/Types: deb deb-src/g' /etc/apt/sources.list.d/ubuntu.sources && \
+    apt update && \
+    apt install -y apt-src && \
+    apt-src update && \
+    apt-src install openssl
+
+RUN cd openssl-* && \
+    sed -i '/^CONFARGS/a CONFARGS += enable-fips no-unit-test' debian/rules && \
+    echo >> debian/control && \
+    echo 'Package: libssl3t64-fips' >> debian/control && \
+    echo 'Section: libs' >> debian/control && \
+    echo 'Architecture: any' >> debian/control && \
+    echo 'Multi-Arch: same' >> debian/control && \
+    echo 'Depends: libssl3t64 (= ${binary:Version}), ${misc:Depends}' >> debian/control && \
+    echo 'Description: OpenSSL fips module' >> debian/control && \
+    echo 'usr/lib/ssl/fipsmodule.cnf' >> debian/libssl3t64-fips.install && \
+    echo 'usr/lib/*/ossl-modules/fips.so' >> debian/libssl3t64-fips.install && \
+    DEB_BUILD_OPTIONS='parallel=8 nocheck' fakeroot debian/rules binary
+
+RUN mkdir /packages/ && \
+    cp *fips*.deb /packages
 
 FROM ubuntu:24.04 AS ovs-builder
 
@@ -29,13 +58,15 @@ ADD patches/786756870f12ac69a5d7bc498693574c6591c5e9.patch $SRC_DIR
 ADD patches/505dc82f54d4ce54e0378fd3bac1052ee644ac59.patch $SRC_DIR
 ADD patches/f4b1f5fbf0f5aff68299efaa2d0577c90cb2568e.patch $SRC_DIR
 ADD patches/b3af07690e7b2328c02318b1bd812c5665c0632b.patch $SRC_DIR
-ADD patches/49834fdd3fa3b066650bc8b7a8b05a773d217d95.patch $SRC_DIR
+ADD patches/4a8e051f2fde25ea558e0c4ccb9f5d2f1ea3c018.patch $SRC_DIR
 ADD patches/03e35ed9c5b4de0fa8acbc2c057cdd5957a8d605.patch $SRC_DIR
 ADD patches/b5e2975eb65f37315545300254fc0f58a9df52b1.patch $SRC_DIR
 ADD patches/e7d3ba53cdcbc524bb29c54ddb07b83cc4258ed7.patch $SRC_DIR
 ADD patches/a9e009136a42cf6d985f97e2bf1ec41df6b5ca29.patch $SRC_DIR
 
-RUN apt update && apt install -y git curl
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt update && apt install -y git curl
 
 RUN cd /usr/src/ && \
     git clone -b branch-3.3 --depth=1 https://github.com/openvswitch/ovs.git && \
@@ -86,7 +117,7 @@ RUN cd /usr/src/ && git clone -b branch-24.03 --depth=1 https://github.com/ovn-o
     # fix lr-lb dnat with multiple distributed gateway ports
     git apply $SRC_DIR/b3af07690e7b2328c02318b1bd812c5665c0632b.patch && \
     # northd: skip arp/nd request for lrp addresses from localnet ports
-    git apply $SRC_DIR/49834fdd3fa3b066650bc8b7a8b05a773d217d95.patch && \
+    git apply $SRC_DIR/4a8e051f2fde25ea558e0c4ccb9f5d2f1ea3c018.patch && \
     # ovn-controller: make activation strategy work for single chassis
     git apply $SRC_DIR/03e35ed9c5b4de0fa8acbc2c057cdd5957a8d605.patch && \
     # support dedicated BFD LRP
@@ -96,8 +127,11 @@ RUN cd /usr/src/ && git clone -b branch-24.03 --depth=1 https://github.com/ovn-o
     # select local backend first
     git apply $SRC_DIR/a9e009136a42cf6d985f97e2bf1ec41df6b5ca29.patch
 
-RUN apt install -y wget build-essential fakeroot \
-    autoconf automake bzip2 debhelper-compat dh-exec dh-python dh-sequence-python3 dh-sequence-sphinxdoc \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt update && \
+    apt install -y wget build-essential fakeroot && \
+    apt install -y autoconf automake bzip2 debhelper-compat dh-exec dh-python dh-sequence-python3 dh-sequence-sphinxdoc \
     graphviz iproute2 libcap-ng-dev libdbus-1-dev libnuma-dev libpcap-dev libssl-dev libtool libunbound-dev \
     pkg-config procps python3-all-dev python3-setuptools python3-sortedcontainers python3-sphinx
 
@@ -131,17 +165,7 @@ RUN cd /usr/src/openbfdd && \
     autoupdate && \
     ./autogen.sh && \
     ./configure --enable-silent-rules && \
-    make
-
-ENV OPENSSL_FIPS_LIBDIR=/usr/local/openssl-fips/lib
-ENV LD_LIBRARY_PATH=$OPENSSL_FIPS_LIBDIR:$LD_LIBRARY_PATH
-RUN wget https://www.openssl.org/source/openssl-3.0.13.tar.gz && \
-    tar -xzf openssl-3.0.13.tar.gz && \
-    cd openssl-3.0.13 && \
-    ./config --prefix=/usr/local/openssl-fips --libdir=lib enable-fips && \
-    make -j8 && \
-    make install && \
-    /usr/local/openssl-fips/bin/openssl fipsinstall -module $OPENSSL_FIPS_LIBDIR/ossl-modules/fips.so -out /usr/local/openssl-fips/ssl/fipsmodule.cnf
+    make -j8
 
 RUN mkdir /packages/ && \
     mv /usr/src/openbfdd/bfdd-beacon /usr/src/openbfdd/bfdd-control /packages/ && \
@@ -154,9 +178,12 @@ RUN mkdir /packages/ && \
 FROM ghcr.io/aquasecurity/trivy:latest AS trivy
 
 ARG ARCH
-ARG CNI_PLUGINS_VERSION="v1.7.1"
-ARG KUBECTL_VERSION="v1.32.5"
-ARG GOBGP_VERSION="3.37.0"
+# renovate: datasource=github-releases depName=cni-plugin packageName=containernetworking/plugins versioning=semver
+ARG CNI_PLUGINS_VERSION=v1.7.1
+# renovate: datasource=github-releases depName=kubectl packageName=kubernetes/kubernetes versioning=semver
+ARG KUBECTL_VERSION=v1.32.7
+# renovate: datasource=github-releases depName=gobgp packageName=osrg/gobgp versioning=semver
+ARG GOBGP_VERSION=3.37.0
 ARG TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
 
 RUN apk --no-cache add curl jq
@@ -170,33 +197,55 @@ ADD go-deps/rebuild-go-deps.sh /
 RUN --mount=type=bind,target=/trivy,from=trivy,source=/godeps \
     bash -x /rebuild-go-deps.sh
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS ubuntu
 
+RUN rm -rf /etc/localtime
+RUN rm -f /usr/lib/apt/methods/mirror
+RUN usermod -s /usr/sbin/nologin sync
+RUN usermod -s /usr/sbin/nologin ubuntu
+RUN apt remove -y --allow-remove-essential --auto-remove login
+
+FROM scratch
+
+LABEL "org.opencontainers.image.ref.name"="ubuntu"
+LABEL "org.opencontainers.image.version"="24.04"
+
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+CMD ["/bin/bash"]
+
+COPY --from=ubuntu / /
+
+ARG ARCH
 ARG DEBIAN_FRONTEND=noninteractive
-RUN apt update && apt upgrade -y && apt install ca-certificates python3 hostname libunwind8 netbase \
-        ethtool iproute2 ncat libunbound8 procps libatomic1 kmod iptables python3-netifaces python3-sortedcontainers \
-        tcpdump ipvsadm ipset curl uuid-runtime openssl inetutils-ping arping ndisc6 conntrack traceroute iputils-tracepath \
-        logrotate dnsutils net-tools strongswan strongswan-pki libcharon-extra-plugins libmnl0 \
-        libcharon-extauth-plugins libstrongswan-extra-plugins libstrongswan-standard-plugins -y --no-install-recommends && \
-        setcap CAP_NET_ADMIN+eip $(readlink -f $(which conntrack)) && \
-        setcap CAP_NET_ADMIN+eip $(readlink -f $(which ethtool)) && \
-        setcap CAP_NET_ADMIN+eip $(readlink -f $(which ip)) && \
-        setcap CAP_NET_ADMIN+eip $(readlink -f $(which ipset)) && \
-        setcap CAP_NET_ADMIN,CAP_NET_RAW+eip $(readlink -f $(which xtables-legacy-multi)) && \
-        setcap CAP_NET_ADMIN,CAP_NET_RAW+eip $(readlink -f $(which xtables-nft-multi)) && \
-        setcap CAP_NET_RAW+eip $(readlink -f $(which arping)) && \
-        setcap CAP_NET_RAW+eip $(readlink -f $(which ndisc6)) && \
-        setcap CAP_NET_RAW+eip $(readlink -f $(which tcpdump)) && \
-        setcap CAP_SYS_ADMIN+eip $(readlink -f $(which nsenter)) && \
-        setcap CAP_SYS_ADMIN+eip $(readlink -f $(which sysctl)) && \
-        setcap CAP_SYS_MODULE+eip $(readlink -f $(which modprobe)) && \
-        setcap CAP_SYS_NICE+eip $(readlink -f $(which nice)) && \
-        rm -rf /var/lib/apt/lists/* && \
-        rm -rf /etc/localtime && \
-        rm -f /usr/bin/nc && \
-        rm -f /usr/bin/netcat && \
-        rm -f /usr/lib/apt/methods/mirror && \
-        deluser sync
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt update && apt upgrade -y && \
+    apt install ca-certificates netbase ethtool iproute2 ncat libunbound8 \
+        kmod iptables python3-netifaces python3-sortedcontainers tcpdump ipvsadm ipset curl \
+        uuid-runtime openssl inetutils-ping arping ndisc6 conntrack traceroute iputils-tracepath \
+        logrotate dnsutils net-tools strongswan strongswan-pki libcharon-extra-plugins \
+        libcharon-extauth-plugins libstrongswan-extra-plugins libstrongswan-standard-plugins \
+        -y --no-install-recommends --auto-remove && \
+    apt remove -y --allow-remove-essential --auto-remove login && \
+    setcap CAP_NET_ADMIN+eip $(readlink -f $(which conntrack)) && \
+    setcap CAP_NET_ADMIN+eip $(readlink -f $(which ethtool)) && \
+    setcap CAP_NET_ADMIN+eip $(readlink -f $(which ip)) && \
+    setcap CAP_NET_ADMIN+eip $(readlink -f $(which ipset)) && \
+    setcap CAP_NET_ADMIN+eip $(readlink -f $(which traceroute)) && \
+    setcap CAP_NET_ADMIN,CAP_NET_RAW+eip $(readlink -f $(which xtables-legacy-multi)) && \
+    setcap CAP_NET_ADMIN,CAP_NET_RAW+eip $(readlink -f $(which xtables-nft-multi)) && \
+    setcap CAP_NET_RAW+eip $(readlink -f $(which arping)) && \
+    setcap CAP_NET_RAW+eip $(readlink -f $(which ndisc6)) && \
+    setcap CAP_NET_RAW+eip $(readlink -f $(which tcpdump)) && \
+    setcap CAP_SYS_ADMIN+eip $(readlink -f $(which nsenter)) && \
+    setcap CAP_SYS_ADMIN+eip $(readlink -f $(which sysctl)) && \
+    setcap CAP_SYS_MODULE+eip $(readlink -f $(which modprobe)) && \
+    setcap CAP_SYS_NICE+eip $(readlink -f $(which nice)) && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm -rf /etc/localtime && \
+    rm -f /usr/bin/nc && \
+    rm -f /usr/bin/netcat && \
+    rm -f /usr/lib/apt/methods/mirror
 
 RUN mkdir -p /var/run/openvswitch && \
     mkdir -p /var/run/ovn && \
@@ -213,35 +262,31 @@ RUN --mount=type=bind,target=/godeps,from=go-deps,source=/godeps \
 
 ARG DEBUG=false
 
-RUN --mount=type=bind,target=/packages,from=ovs-builder,source=/packages  \
+RUN --mount=type=bind,target=/packages,from=ovs-builder,source=/packages \
     cp /packages/bfdd-beacon /packages/bfdd-control /usr/bin/ && \
     cp /packages/ovs-sandbox /usr/bin/ && chmod +x /usr/bin/ovs-sandbox && \
     setcap CAP_NET_BIND_SERVICE+eip /usr/bin/bfdd-beacon && \
-    dpkg -i /packages/openvswitch-*.deb /packages/python3-openvswitch*.deb && \
-    dpkg -i --ignore-depends=openvswitch-switch,openvswitch-common /packages/ovn-*.deb && \
+    dpkg -i /packages/openvswitch-*.deb /packages/python3-openvswitch*.deb /packages/ovn-*.deb && \
     rm -rf /var/lib/openvswitch/pki/ && \
     chown -R nobody: /var/lib/logrotate && \
     setcap CAP_NET_ADMIN+eip $(readlink -f $(which ovs-dpctl)) && \
     if [ "${DEBUG}" != "true" ]; then \
         setcap CAP_NET_BIND_SERVICE+eip $(readlink -f $(which ovsdb-server)) && \
-        setcap CAP_NET_ADMIN,CAP_NET_BIND_SERVICE,CAP_SYS_ADMIN+eip $(readlink -f $(which ovs-vswitchd)); \
+        setcap CAP_NET_ADMIN,CAP_NET_BIND_SERVICE,CAP_SYS_ADMIN+eip $(readlink -f $(which ovs-vswitchd)) && \
+        dpkg --purge gpgv apt; \
     else \
         apt update && apt install -y --no-install-recommends gdb valgrind && \
         rm -rf /var/lib/apt/lists/* && \
-        dpkg -i --ignore-depends=openvswitch-switch,openvswitch-common /packages/*.ddeb; \
+        dpkg -i /packages/*.ddeb; \
     fi
 
-RUN if [ "$ARCH" = "amd64" ]; then \
-      # env OPENSSL_CONF is only work when user is root, not effect when user is nobody, maybe openssl bug, so we copy openssl binary and libraries to /usr/bin and /usr/lib/x86_64-linux-gnu 
-      cp /usr/local/openssl-fips/bin/openssl /usr/bin/openssl && \
-      cp /usr/local/openssl-fips/lib/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so.3 && \
-      cp /usr/local/openssl-fips/lib/libcrypto.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3 && \
-      cp /usr/local/openssl-fips/lib/ossl-modules/fips.so /usr/lib/x86_64-linux-gnu/ossl-modules/; \
-    elif [ "$ARCH" = "arm64" ]; then \
-      cp /usr/local/openssl-fips/bin/openssl /usr/bin/openssl && \
-      cp /usr/local/openssl-fips/lib/libssl.so.3 /usr/lib/aarch64-linux-gnu/libssl.so.3 && \
-      cp /usr/local/openssl-fips/lib/libcrypto.so.3 /usr/lib/aarch64-linux-gnu/libcrypto.so.3 && \
-      cp /usr/local/openssl-fips/lib/ossl-modules/fips.so /usr/lib/aarch64-linux-gnu/ossl-modules/; \
-    fi
+RUN --mount=type=bind,target=/packages,from=openssl-builder,source=/packages \
+    dpkg -i /packages/*.deb && \
+    openssl fipsinstall -out /usr/lib/ssl/fipsmodule.cnf -module $(find / -name fips.so) && \
+    sed -i --follow-symlinks \
+        -e '/^\[provider_sect\]/a fips = fips_sect' \
+        -e '/^\[default_sect\]/a activate = 1' \
+        -e '$a \\n.include /usr/lib/ssl/fipsmodule.cnf' \
+        /usr/lib/ssl/openssl.cnf
 
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]

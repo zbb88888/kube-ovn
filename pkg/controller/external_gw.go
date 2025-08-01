@@ -11,6 +11,7 @@ import (
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
@@ -21,9 +22,24 @@ import (
 var (
 	exGwEnabled = "unknown"
 	lastExGwCM  map[string]string
+
+	externalGatewayNodeSelector = labels.Set{util.ExGatewayLabel: "true"}.AsSelector()
 )
 
 func (c *Controller) resyncExternalGateway() {
+	// check if default vpc only use extra external subnet
+	defaultVPC, err := c.vpcsLister.Get(c.config.ClusterRouter)
+	if err != nil {
+		klog.Errorf("failed to get vpc %s, %v", c.config.ClusterRouter, err)
+		return
+	}
+
+	if defaultVPC.Spec.ExtraExternalSubnets != nil || defaultVPC.Status.ExtraExternalSubnets != nil {
+		// vpc controller will handle
+		klog.Infof("default vpc only use extra external subnets: %v", defaultVPC.Spec.ExtraExternalSubnets)
+		return
+	}
+
 	cm, err := c.configMapsLister.ConfigMaps(c.config.ExternalGatewayConfigNS).Get(util.ExternalGatewayConfig)
 	if err != nil && !k8serrors.IsNotFound(err) {
 		klog.Errorf("failed to get ovn-external-gw-config, %v", err)
@@ -77,8 +93,7 @@ func (c *Controller) resyncExternalGateway() {
 }
 
 func (c *Controller) removeExternalGateway() error {
-	sel, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{util.ExGatewayLabel: "true"}})
-	nodes, err := c.nodesLister.List(sel)
+	nodes, err := c.nodesLister.List(externalGatewayNodeSelector)
 	if err != nil {
 		klog.Errorf("failed to list external gw nodes, %v", err)
 		return err
@@ -207,8 +222,7 @@ func (c *Controller) createDefaultVpcLrpEip() (string, string, error) {
 
 func (c *Controller) getGatewayChassis(config map[string]string) ([]string, error) {
 	chassises := []string{}
-	sel, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{util.ExGatewayLabel: "true"}})
-	nodes, err := c.nodesLister.List(sel)
+	nodes, err := c.nodesLister.List(externalGatewayNodeSelector)
 	if err != nil {
 		klog.Errorf("failed to list external gw nodes, %v", err)
 		return nil, err

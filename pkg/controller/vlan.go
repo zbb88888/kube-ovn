@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,6 +85,11 @@ func (c *Controller) handleAddVlan(key string) error {
 		return err
 	}
 
+	if err = c.checkVlanConflict(vlan); err != nil {
+		klog.Errorf("failed to check vlan %s: %v", vlan.Name, err)
+		return err
+	}
+
 	if !slices.Contains(pn.Status.Vlans, vlan.Name) {
 		newPn := pn.DeepCopy()
 		newPn.Status.Vlans = append(newPn.Status.Vlans, vlan.Name)
@@ -95,6 +101,39 @@ func (c *Controller) handleAddVlan(key string) error {
 	}
 
 	return nil
+}
+
+func (c *Controller) checkVlanConflict(vlan *kubeovnv1.Vlan) error {
+	if vlan.Spec.ID == 0 {
+		// no conflict if vlan id is 0
+		return nil
+	}
+	// todo: check if vlan conflict in webhook
+	vlans, err := c.vlansLister.List(labels.Everything())
+	if err != nil {
+		klog.Errorf("failed to list vlans: %v", err)
+		return err
+	}
+	// check if new vlan conflict with old vlan
+	var conflict bool
+	var conflictErr error
+	for _, v := range vlans {
+		// different provider allow to have same vlan
+		if vlan.Spec.Provider == v.Spec.Provider && vlan.Spec.ID == v.Spec.ID && vlan.Name != v.Name {
+			conflictErr = fmt.Errorf("provider %s new vlan %s conflict with old vlan %s", vlan.Spec.Provider, vlan.Name, v.Name)
+			klog.Error(conflictErr)
+			conflict = true
+		}
+	}
+	if vlan.Status.Conflict != conflict {
+		vlan.Status.Conflict = conflict
+		vlan, err = c.config.KubeOvnClient.KubeovnV1().Vlans().UpdateStatus(context.Background(), vlan, metav1.UpdateOptions{})
+		if err != nil {
+			klog.Errorf("failed to update conflict status of vlan %s: %v", vlan.Name, err)
+			return err
+		}
+	}
+	return conflictErr
 }
 
 func (c *Controller) handleUpdateVlan(key string) error {
@@ -114,12 +153,16 @@ func (c *Controller) handleUpdateVlan(key string) error {
 	if vlan.Spec.Provider == "" {
 		newVlan := vlan.DeepCopy()
 		newVlan.Spec.Provider = c.config.DefaultProviderName
-		if _, err = c.config.KubeOvnClient.KubeovnV1().Vlans().Update(context.Background(), newVlan, metav1.UpdateOptions{}); err != nil {
+		if vlan, err = c.config.KubeOvnClient.KubeovnV1().Vlans().Update(context.Background(), newVlan, metav1.UpdateOptions{}); err != nil {
 			klog.Errorf("failed to update vlan %s: %v", vlan.Name, err)
 			return err
 		}
 	}
-
+	newVlan := vlan.DeepCopy()
+	if err = c.checkVlanConflict(newVlan); err != nil {
+		klog.Errorf("failed to check vlan %s: %v", vlan.Name, err)
+		return err
+	}
 	subnets, err := c.subnetsLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list subnets: %v", err)

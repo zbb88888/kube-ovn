@@ -3,6 +3,8 @@ package ovn_monitor
 import (
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -19,7 +21,6 @@ import (
 
 func CmdMain() {
 	defer klog.Flush()
-
 	klog.Info(versions.String())
 
 	currentCaps := cap.GetProc()
@@ -29,6 +30,12 @@ func CmdMain() {
 	if err != nil {
 		util.LogFatalAndExit(err, "failed to parse config")
 	}
+
+	perm, err := strconv.ParseUint(config.LogPerm, 8, 32)
+	if err != nil {
+		util.LogFatalAndExit(err, "failed to parse log-perm")
+	}
+	util.InitLogFilePerm("kube-ovn-monitor", os.FileMode(perm))
 
 	ctrl.SetLogger(klog.NewKlogr())
 	ctx := signals.SetupSignalHandler()
@@ -44,7 +51,7 @@ func CmdMain() {
 		for _, metricsAddr := range metricsAddrs {
 			addr := util.JoinHostPort(metricsAddr, config.MetricsPort)
 			go func() {
-				if err := metrics.Run(ctx, nil, addr, config.SecureServing, false); err != nil {
+				if err := metrics.Run(ctx, nil, addr, config.SecureServing, false, config.TLSMinVersion, config.TLSMaxVersion, config.TLSCipherSuites); err != nil {
 					util.LogFatalAndExit(err, "failed to run metrics server")
 				}
 			}()

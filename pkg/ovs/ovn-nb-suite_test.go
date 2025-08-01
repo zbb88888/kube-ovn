@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v5"
 	"github.com/go-logr/stdr"
 	"github.com/ovn-org/libovsdb/client"
 	"github.com/ovn-org/libovsdb/database/inmemory"
@@ -665,6 +665,10 @@ func (suite *OvnClientTestSuite) Test_portGroupSetPorts() {
 	suite.testPortGroupSetPorts()
 }
 
+func (suite *OvnClientTestSuite) Test_removePortFromPortGroups() {
+	suite.testRemovePortFromPortGroups()
+}
+
 /* address_set unit test */
 func (suite *OvnClientTestSuite) Test_CreateAddressSet() {
 	suite.testCreateAddressSet()
@@ -1205,6 +1209,10 @@ func (suite *OvnClientTestSuite) Test_OvsFind() {
 
 func (suite *OvnClientTestSuite) Test_ParseOvsFindOutput() {
 	suite.testParseOvsFindOutput()
+}
+
+func (suite *OvnClientTestSuite) Test_OvsRemove() {
+	suite.testOvsRemove()
 }
 
 func (suite *OvnClientTestSuite) Test_OvsClear() {

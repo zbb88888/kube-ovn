@@ -2,12 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +30,6 @@ import (
 
 func main() {
 	defer klog.Flush()
-
 	config := daemon.ParseFlags()
 	klog.Info(versions.String())
 
@@ -38,7 +39,11 @@ func main() {
 		}
 		return
 	}
-
+	perm, err := strconv.ParseUint(config.LogPerm, 8, 32)
+	if err != nil {
+		util.LogFatalAndExit(err, "failed to parse log-perm")
+	}
+	util.InitLogFilePerm("kube-ovn-cni", os.FileMode(perm))
 	printCaps()
 
 	ovs.UpdateOVSVsctlLimiter(config.OVSVsctlConcurrency)
@@ -91,7 +96,15 @@ func main() {
 		kubeovninformer.WithTweakListOptions(func(listOption *v1.ListOptions) {
 			listOption.AllowWatchBookmarks = true
 		}))
-	ctl, err := daemon.NewController(config, stopCh, podInformerFactory, nodeInformerFactory, kubeovnInformerFactory)
+
+	caSecretInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(config.KubeClient, 0,
+		kubeinformers.WithTweakListOptions(func(listOption *v1.ListOptions) {
+			listOption.FieldSelector = fmt.Sprintf("metadata.name=%s", util.DefaultOVNIPSecCA)
+		}),
+		kubeinformers.WithNamespace(os.Getenv("POD_NAMESPACE")),
+	)
+
+	ctl, err := daemon.NewController(config, stopCh, podInformerFactory, nodeInformerFactory, caSecretInformerFactory, kubeovnInformerFactory)
 	if err != nil {
 		util.LogFatalAndExit(err, "failed to create controller")
 	}
@@ -153,7 +166,7 @@ func main() {
 		for _, addr := range addrs {
 			listenAddr := util.JoinHostPort(addr, config.PprofPort)
 			go func() {
-				if err := metrics.Run(ctx, nil, listenAddr, config.SecureServing, servePprofInMetricsServer); err != nil {
+				if err := metrics.Run(ctx, nil, listenAddr, config.SecureServing, servePprofInMetricsServer, config.TLSMinVersion, config.TLSMaxVersion, config.TLSCipherSuites); err != nil {
 					util.LogFatalAndExit(err, "failed to run metrics server")
 				}
 			}()

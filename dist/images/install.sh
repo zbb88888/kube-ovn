@@ -41,6 +41,9 @@ OVS_VSCTL_CONCURRENCY=${OVS_VSCTL_CONCURRENCY:-100}
 ENABLE_COMPACT=${ENABLE_COMPACT:-false}
 SECURE_SERVING=${SECURE_SERVING:-false}
 ENABLE_OVN_IPSEC=${ENABLE_OVN_IPSEC:-false}
+CERT_MANAGER_IPSEC_CERT=${CERT_MANAGER_IPSEC_CERT:-false}
+IPSEC_CERT_DURATION=${IPSEC_CERT_DURATION:-63072000} # 2 years in seconds
+CERT_MANAGER_ISSUER_NAME=${CERT_MANAGER_ISSUER_NAME:-kube-ovn}
 ENABLE_ANP=${ENABLE_ANP:-false}
 SET_VXLAN_TX_OFF=${SET_VXLAN_TX_OFF:-false}
 OVSDB_CON_TIMEOUT=${OVSDB_CON_TIMEOUT:-3}
@@ -68,7 +71,7 @@ CNI_BIN_DIR="/opt/cni/bin"
 
 REGISTRY="docker.io/kubeovn"
 VPC_NAT_IMAGE="vpc-nat-gateway"
-VERSION="v1.14.0"
+VERSION="v1.15.0"
 IMAGE_PULL_POLICY="IfNotPresent"
 POD_CIDR="10.16.0.0/16"                     # Do NOT overlap with NODE/SVC/JOIN CIDR
 POD_GATEWAY="10.16.0.1"
@@ -211,7 +214,7 @@ if [[ $ENABLE_SSL = "true" ]];then
       exit 1
     fi
     kubectl create secret generic -n kube-system kube-ovn-tls --from-file=cacert=cacert.pem --from-file=cert=ovn-cert.pem --from-file=key=ovn-privkey.pem
-    rm -rf cacert.pem ovn-cert.pem ovn-privkey.pem ovn-req.pem
+    rm -rf cakey.pem cacert.pem ovn-cert.pem ovn-privkey.pem ovn-req.pem
   fi
   echo "-------------------------------"
   echo ""
@@ -1217,7 +1220,6 @@ spec:
               type: object
               required:
                 - externalSubnet
-                - policies
               x-kubernetes-validations:
                 - rule: "!has(self.internalIPs) || size(self.internalIPs) == 0 || size(self.internalIPs) >= self.replicas"
                   message: 'Size of Internal IPs MUST be equal to or greater than Replicas'
@@ -1225,6 +1227,8 @@ spec:
                 - rule: "!has(self.externalIPs) || size(self.externalIPs) == 0 || size(self.externalIPs) >= self.replicas"
                   message: 'Size of External IPs MUST be equal to or greater than Replicas'
                   fieldPath: ".externalIPs"
+                - rule: "size(self.policies) != 0 || size(self.selectors) != 0"
+                  message: 'Each VPC Egress Gateway MUST have at least one policy or selector'
               properties:
                 replicas:
                   type: integer
@@ -1286,9 +1290,65 @@ spec:
                       type: integer
                       format: int32
                       default: 3
+                selectors:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      namespaceSelector:
+                        type: object
+                        properties:
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          matchExpressions:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                key:
+                                  type: string
+                                operator:
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                                - key
+                                - operator
+                        x-kubernetes-validations:
+                          - rule: "size(self.matchLabels) != 0 || size(self.matchExpressions) != 0"
+                            message: 'Each namespace selector MUST have at least one matchLabels or matchExpressions'
+                      podSelector:
+                        type: object
+                        properties:
+                          matchLabels:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          matchExpressions:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                key:
+                                  type: string
+                                operator:
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  type: array
+                              required:
+                                - key
+                                - operator
+                        x-kubernetes-validations:
+                          - rule: "size(self.matchLabels) != 0 || size(self.matchExpressions) != 0"
+                            message: 'Each pod selector MUST have at least one matchLabels or matchExpressions'
                 policies:
                   type: array
-                  minItems: 1
                   items:
                     type: object
                     properties:
@@ -1313,6 +1373,12 @@ spec:
                     x-kubernetes-validations:
                       - rule: "size(self.ipBlocks) != 0 || size(self.subnets) != 0"
                         message: 'Each policy MUST have at least one ipBlock or subnet'
+                trafficPolicy:
+                  type: string
+                  enum:
+                    - Local
+                    - Cluster
+                  default: Cluster
                 nodeSelector:
                   type: array
                   items:
@@ -1843,6 +1909,9 @@ spec:
       - jsonPath: .status.vpc
         name: Vpc
         type: string
+      - jsonPath: .spec.type
+        name: Type
+        type: string
       - jsonPath: .status.v4Eip
         name: V4Eip
         type: string
@@ -1906,6 +1975,8 @@ spec:
                 ovnEip:
                   type: string
                 ipType:
+                  type: string
+                type:
                   type: string
                 ipName:
                   type: string
@@ -2963,6 +3034,8 @@ spec:
                   type: array
                   items:
                     type: string
+                conflict:
+                  type: boolean
       additionalPrinterColumns:
       - name: ID
         type: string
@@ -2970,6 +3043,9 @@ spec:
       - name: Provider
         type: string
         jsonPath: .spec.provider
+      - name: conflict
+        type: boolean
+        jsonPath: .status.conflict
   scope: Cluster
   names:
     plural: vlans
@@ -3025,6 +3101,31 @@ spec:
                           type: string
                 exchangeLinkName:
                   type: boolean
+                nodeSelector:
+                  properties:
+                    matchExpressions:
+                      items:
+                        properties:
+                          key:
+                            type: string
+                            x-kubernetes-patch-strategy: merge
+                            x-kubernetes-patch-merge-key: key
+                          operator:
+                            type: string
+                          values:
+                            items:
+                              type: string
+                            type: array
+                        required:
+                          - key
+                          - operator
+                        type: object
+                      type: array
+                    matchLabels:
+                      additionalProperties:
+                        type: string
+                      type: object
+                  type: object
                 excludeNodes:
                   type: array
                   items:
@@ -3311,9 +3412,14 @@ rules:
       - ""
     resources:
       - services
-      - endpoints
     verbs:
       - get
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - list
   - apiGroups:
       - apps
     resources:
@@ -3429,6 +3535,8 @@ rules:
       - network-attachment-definitions
     verbs:
       - get
+      - list
+      - watch
   - apiGroups:
       - ""
       - networking.k8s.io
@@ -3520,6 +3628,7 @@ rules:
     verbs:
       - get
       - list
+      - watch
   - apiGroups:
       - "policy.networking.k8s.io"
     resources:
@@ -3700,12 +3809,32 @@ rules:
       - "list"
       - "watch"
       - "delete"
-  - apiGroups:
-      - ""
-    resources:
-      - "secrets"
-    verbs:
-      - "get"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secret-reader-ovn-ipsec
+  namespace: kube-system
+rules:
+- apiGroups: 
+    - ""
+  resources: 
+    - "secrets"
+  resourceNames:
+    - "ovn-ipsec-ca"
+  verbs: 
+    - "get"
+    - "list"
+    - "watch"
+- apiGroups: 
+    - "cert-manager.io"
+  resources: 
+    - "certificaterequests"
+  verbs: 
+    - "get"
+    - "list"
+    - "create"
+    - "delete"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -3733,6 +3862,20 @@ subjects:
   - kind: ServiceAccount
     name: kube-ovn-cni
     namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-ovn-cni-secret-reader
+  namespace: kube-system
+subjects:
+- kind: ServiceAccount
+  name: kube-ovn-cni
+  namespace: kube-system
+roleRef:
+  kind: Role
+  name: secret-reader-ovn-ipsec
+  apiGroup: rbac.authorization.k8s.io
 EOF
 
 cat <<EOF > kube-ovn-app-sa.yaml
@@ -4535,6 +4678,7 @@ spec:
           - --enable-metrics=$ENABLE_METRICS
           - --node-local-dns-ip=$NODE_LOCAL_DNS_IP
           - --enable-ovn-ipsec=$ENABLE_OVN_IPSEC
+          - --cert-manager-ipsec-cert=$CERT_MANAGER_IPSEC_CERT
           - --secure-serving=${SECURE_SERVING}
           - --enable-anp=$ENABLE_ANP
           - --ovsdb-con-timeout=$OVSDB_CON_TIMEOUT
@@ -4730,6 +4874,9 @@ spec:
           - --ovs-vsctl-concurrency=$OVS_VSCTL_CONCURRENCY
           - --secure-serving=${SECURE_SERVING}
           - --enable-ovn-ipsec=$ENABLE_OVN_IPSEC
+          - --cert-manager-ipsec-cert=$CERT_MANAGER_IPSEC_CERT
+          - --ovn-ipsec-cert-duration=$IPSEC_CERT_DURATION
+          - --cert-manager-issuer-name=$CERT_MANAGER_ISSUER_NAME
           - --set-vxlan-tx-off=$SET_VXLAN_TX_OFF
         securityContext:
           runAsUser: 0

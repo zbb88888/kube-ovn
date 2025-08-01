@@ -79,17 +79,19 @@ func (c *Controller) enqueueUpdateSubnet(oldObj, newObj any) {
 
 	if oldSubnet.Spec.Vpc != newSubnet.Spec.Vpc &&
 		((oldSubnet.Spec.Vpc != "" || newSubnet.Spec.Vpc != c.config.ClusterRouter) && (oldSubnet.Spec.Vpc != c.config.ClusterRouter || newSubnet.Spec.Vpc != "")) {
-		if newSubnet.Annotations == nil {
-			newSubnet.Annotations = make(map[string]string)
-		}
-
+		// recode last vpc name for subnet
 		if oldSubnet.Spec.Vpc == "" {
-			newSubnet.Annotations[util.VpcLastName] = c.config.ClusterRouter
+			c.subnetLastVpcNameMap.Store(newSubnet.Name, c.config.ClusterRouter)
 		} else {
-			newSubnet.Annotations[util.VpcLastName] = oldSubnet.Spec.Vpc
+			c.subnetLastVpcNameMap.Store(newSubnet.Name, oldSubnet.Spec.Vpc)
 		}
 
 		c.updateVpcStatusQueue.Add(oldSubnet.Spec.Vpc)
+	}
+
+	if oldSubnet.Spec.U2OInterconnection != newSubnet.Spec.U2OInterconnection {
+		klog.Infof("enqueue update vpc %s triggered by u2o interconnection change of subnet %s", newSubnet.Spec.Vpc, key)
+		c.addOrUpdateVpcQueue.Add(newSubnet.Spec.Vpc)
 	}
 
 	if oldSubnet.Spec.Private != newSubnet.Spec.Private ||
@@ -174,14 +176,6 @@ func (c *Controller) formatSubnet(subnet *kubeovnv1.Subnet) (*kubeovnv1.Subnet, 
 		}
 	}
 
-	if subnet.Spec.Vlan != "" {
-		if _, err := c.vlansLister.Get(subnet.Spec.Vlan); err != nil {
-			err = fmt.Errorf("failed to get vlan %s: %w", subnet.Spec.Vlan, err)
-			klog.Error(err)
-			return nil, err
-		}
-	}
-
 	if subnet.Spec.EnableLb == nil && subnet.Name != c.config.NodeSwitch {
 		changed = true
 		subnet.Spec.EnableLb = &c.config.EnableLb
@@ -197,6 +191,11 @@ func (c *Controller) formatSubnet(subnet *kubeovnv1.Subnet) (*kubeovnv1.Subnet, 
 		changed = true
 	}
 
+	if subnet.Spec.Vlan == "" && subnet.Spec.U2OInterconnection {
+		subnet.Spec.U2OInterconnection = false
+		changed = true
+	}
+
 	klog.Infof("format subnet %v, changed %v", subnet.Name, changed)
 	if changed {
 		newSubnet, err := c.config.KubeOvnClient.KubeovnV1().Subnets().Update(context.Background(), subnet, metav1.UpdateOptions{})
@@ -207,6 +206,26 @@ func (c *Controller) formatSubnet(subnet *kubeovnv1.Subnet) (*kubeovnv1.Subnet, 
 		return newSubnet, nil
 	}
 	return subnet, nil
+}
+
+func (c *Controller) validateSubnetVlan(subnet *kubeovnv1.Subnet) error {
+	if subnet.Spec.Vlan == "" {
+		return nil
+	}
+
+	vlan, err := c.vlansLister.Get(subnet.Spec.Vlan)
+	if err != nil {
+		err = fmt.Errorf("failed to get vlan %s: %w", subnet.Spec.Vlan, err)
+		klog.Error(err)
+		return err
+	}
+
+	if vlan.Status.Conflict {
+		err = fmt.Errorf("subnet %s has invalid conflict vlan %s", subnet.Name, vlan.Name)
+		klog.Error(err)
+		return err
+	}
+	return nil
 }
 
 func (c *Controller) updateNatOutgoingPolicyRulesStatus(subnet *kubeovnv1.Subnet) error {
@@ -465,9 +484,9 @@ func (c *Controller) validateVpcBySubnet(subnet *kubeovnv1.Subnet) (*kubeovnv1.V
 			klog.Errorf("failed to list vpc, %v", err)
 			return vpc, err
 		}
+		lastVpcName, _ := c.subnetLastVpcNameMap.Load(subnet.Name)
 		for _, vpc := range vpcs {
-			if (subnet.Annotations[util.VpcLastName] == "" && subnet.Spec.Vpc != vpc.Name ||
-				subnet.Annotations[util.VpcLastName] != "" && subnet.Annotations[util.VpcLastName] != vpc.Name) &&
+			if (lastVpcName == "" && subnet.Spec.Vpc != vpc.Name || lastVpcName != "" && lastVpcName != vpc.Name) &&
 				!vpc.Status.Default && util.IsStringsOverlap(vpc.Spec.Namespaces, subnet.Spec.Namespaces) {
 				err = fmt.Errorf("namespaces %v are overlap with vpc '%s'", subnet.Spec.Namespaces, vpc.Name)
 				klog.Error(err)
@@ -611,7 +630,19 @@ func (c *Controller) handleAddOrUpdateSubnet(key string) error {
 	subnet := cachedSubnet.DeepCopy()
 	subnet, err = c.formatSubnet(subnet)
 	if err != nil {
+		err := fmt.Errorf("failed to format subnet %s, %w", key, err)
 		klog.Error(err)
+		return err
+	}
+
+	err = c.validateSubnetVlan(subnet)
+	if err != nil {
+		err := fmt.Errorf("failed to validate vlan for subnet %s, %w", key, err)
+		klog.Error(err)
+		if err = c.patchSubnetStatus(subnet, "ValidateSubnetVlanFailed", err.Error()); err != nil {
+			klog.Error(err)
+			return err
+		}
 		return err
 	}
 
@@ -989,6 +1020,9 @@ func (c *Controller) handleDeleteSubnet(subnet *kubeovnv1.Subnet) error {
 		}
 	}
 
+	// clean up subnet last vpc name cached
+	c.subnetLastVpcNameMap.Delete(subnet.Name)
+
 	return nil
 }
 
@@ -1024,13 +1058,9 @@ func (c *Controller) reconcileSubnet(subnet *kubeovnv1.Subnet) error {
 			klog.Errorf("reconcile default vpc ovn route for subnet %s failed: %v", subnet.Name, err)
 			return err
 		}
-	}
-
-	if subnet.Spec.Vpc != c.config.ClusterRouter {
-		if err := c.reconcileCustomVpcStaticRoute(subnet); err != nil {
-			klog.Errorf("reconcile custom vpc ovn route for subnet %s failed: %v", subnet.Name, err)
-			return err
-		}
+	} else if err := c.reconcileCustomVpcStaticRoute(subnet); err != nil {
+		klog.Errorf("reconcile custom vpc ovn route for subnet %s failed: %v", subnet.Name, err)
+		return err
 	}
 
 	if err := c.reconcileVlan(subnet); err != nil {
@@ -1426,6 +1456,12 @@ func (c *Controller) reconcileDistributedSubnetRouteInDefaultVpc(subnet *kubeovn
 		}
 	}
 
+	portGroups, err := c.OVNNbClient.ListPortGroups(map[string]string{"subnet": subnet.Name, "node": "", networkPolicyKey: ""})
+	if err != nil {
+		klog.Errorf("failed to list port groups for subnet %s: %v", subnet.Name, err)
+		return err
+	}
+
 	pods, err := c.podsLister.Pods(metav1.NamespaceAll).List(labels.Everything())
 	if err != nil {
 		klog.Errorf("failed to list pods %v", err)
@@ -1474,6 +1510,18 @@ func (c *Controller) reconcileDistributedSubnetRouteInDefaultVpc(subnet *kubeovn
 			portsToAdd = append(portsToAdd, port)
 		}
 
+		// remove lsp from other port groups
+		// we need to do this because the pod, e.g. a sts/vm, can be rescheduled to another node
+		for _, pg := range portGroups {
+			if pg.Name == pgName {
+				continue
+			}
+			if err = c.OVNNbClient.PortGroupRemovePorts(pg.Name, podPorts...); err != nil {
+				klog.Errorf("remove ports from port group %s: %v", pg.Name, err)
+				return err
+			}
+		}
+		// add ports to the port group
 		if err = c.OVNNbClient.PortGroupAddPorts(pgName, portsToAdd...); err != nil {
 			klog.Errorf("add ports to port group %s: %v", pgName, err)
 			return err
@@ -1778,21 +1826,22 @@ func (c *Controller) reconcileCustomVpcStaticRoute(subnet *kubeovnv1.Subnet) err
 		}
 	}
 
+	if subnet.Spec.Vlan == "" || subnet.Spec.LogicalGateway || subnet.Spec.U2OInterconnection {
+		if err = c.addCustomVPCStaticRouteForSubnet(subnet); err != nil {
+			klog.Errorf("failed to add static route for underlay to overlay subnet interconnection %s %v", subnet.Name, err)
+			return err
+		}
+		if err = c.addCustomVPCPolicyRoutesForSubnet(subnet); err != nil {
+			klog.Error(err)
+			return err
+		}
+	}
+
 	if subnet.Spec.Vlan != "" && !subnet.Spec.LogicalGateway && subnet.Spec.U2OInterconnection && subnet.Status.U2OInterconnectionIP != "" {
 		if err := c.addPolicyRouteForU2OInterconn(subnet); err != nil {
 			klog.Errorf("failed to add policy route for underlay to overlay subnet interconnection %s %v", subnet.Name, err)
 			return err
 		}
-
-		if err := c.addStaticRouteForU2OInterconn(subnet); err != nil {
-			klog.Errorf("failed to add static route for underlay to overlay subnet interconnection %s %v", subnet.Name, err)
-			return err
-		}
-	}
-
-	if err := c.addCustomVPCPolicyRoutesForSubnet(subnet); err != nil {
-		klog.Error(err)
-		return err
 	}
 
 	return nil
@@ -1824,6 +1873,11 @@ func (c *Controller) reconcileVlan(subnet *kubeovnv1.Subnet) error {
 	vlan, err := c.vlansLister.Get(subnet.Spec.Vlan)
 	if err != nil {
 		klog.Errorf("failed to get vlan %s: %v", subnet.Spec.Vlan, err)
+		return err
+	}
+	if vlan.Status.Conflict {
+		err = fmt.Errorf("subnet %s has invalid conflict vlan %s", subnet.Name, vlan.Name)
+		klog.Error(err)
 		return err
 	}
 
@@ -2449,7 +2503,13 @@ func (c *Controller) createPortGroupForDistributedSubnet(node *v1.Node, subnet *
 	}
 
 	pgName := getOverlaySubnetsPortGroupName(subnet.Name, node.Name)
-	if err := c.OVNNbClient.CreatePortGroup(pgName, map[string]string{networkPolicyKey: subnet.Name + "/" + node.Name}); err != nil {
+	externalIDs := map[string]string{
+		"subnet":         subnet.Name,
+		"node":           node.Name,
+		"vendor":         util.CniTypeName,
+		networkPolicyKey: subnet.Name + "/" + node.Name,
+	}
+	if err := c.OVNNbClient.CreatePortGroup(pgName, externalIDs); err != nil {
 		klog.Errorf("create port group for subnet %s and node %s: %v", subnet.Name, node.Name, err)
 		return err
 	}
@@ -2847,7 +2907,7 @@ func (c *Controller) deletePolicyRouteForU2OInterconn(subnet *kubeovnv1.Subnet) 
 	return nil
 }
 
-func (c *Controller) addStaticRouteForU2OInterconn(subnet *kubeovnv1.Subnet) error {
+func (c *Controller) addCustomVPCStaticRouteForSubnet(subnet *kubeovnv1.Subnet) error {
 	if subnet.Spec.Vpc == "" {
 		return nil
 	}
@@ -3230,8 +3290,7 @@ func (c *Controller) deletePolicyRouteForU2ONoLoadBalancer(subnet *kubeovnv1.Sub
 }
 
 func (c *Controller) findSubnetByNetworkAttachmentDefinition(ns, name string, subnets []*kubeovnv1.Subnet) (*kubeovnv1.Subnet, error) {
-	nadClient := c.config.AttachNetClient.K8sCniCncfIoV1().NetworkAttachmentDefinitions(ns)
-	nad, err := nadClient.Get(context.Background(), name, metav1.GetOptions{})
+	nad, err := c.netAttachLister.NetworkAttachmentDefinitions(ns).Get(name)
 	if err != nil {
 		klog.Errorf("failed to get net-attach-def %s/%s: %v", ns, name, err)
 		return nil, err
