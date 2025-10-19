@@ -24,6 +24,12 @@ ifeq ($(shell echo $(E2E_BRANCH) | grep -o ^release-),release-)
 VERSION_NUM = $(subst release-,,$(E2E_BRANCH))
 VER_MAJOR = $(shell echo $(VERSION_NUM) | cut -f1 -d.)
 VER_MINOR = $(shell echo $(VERSION_NUM) | cut -f2 -d.)
+ifeq ($(shell test $(VER_MAJOR) -lt 1 -o \( $(VER_MAJOR) -eq 1 -a $(VER_MINOR) -lt 14 \) && echo true),true)
+K8S_CONFORMANCE_E2E_SKIP += "sig-network.*EndpointSlice"
+endif
+ifeq ($(shell test $(VER_MAJOR) -lt 1 -o \( $(VER_MAJOR) -eq 1 -a $(VER_MINOR) -lt 13 \) && echo true),true)
+K8S_CONFORMANCE_E2E_SKIP += "sig-network.*ServiceCIDR and IPAddress API"
+endif
 ifeq ($(shell test $(VER_MAJOR) -lt 1 -o \( $(VER_MAJOR) -eq 1 -a $(VER_MINOR) -lt 12 \) && echo true),true)
 K8S_CONFORMANCE_E2E_SKIP += "sig-network.*Services.*session affinity"
 K8S_CONFORMANCE_E2E_SKIP += "sig-network.*Feature:SCTPConnectivity"
@@ -90,6 +96,7 @@ e2e-build:
 	ginkgo build $(E2E_BUILD_FLAGS) ./test/e2e/webhook
 	ginkgo build $(E2E_BUILD_FLAGS) ./test/e2e/connectivity
 	ginkgo build $(E2E_BUILD_FLAGS) ./test/e2e/metallb
+	ginkgo build $(E2E_BUILD_FLAGS) ./test/e2e/anp-domain
 
 .PHONY: k8s-conformance-e2e
 k8s-conformance-e2e:
@@ -132,7 +139,7 @@ kube-ovn-conformance-e2e:
 	E2E_BRANCH=$(E2E_BRANCH) \
 	E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 	E2E_NETWORK_MODE=$(E2E_NETWORK_MODE) \
-	ginkgo $(GINKGO_OUTPUT_OPT) $(GINKGO_PARALLEL_OPT) --randomize-all -v --timeout=30m \
+	ginkgo $(GINKGO_OUTPUT_OPT) $(GINKGO_PARALLEL_OPT) --randomize-all -v --timeout=35m \
 		--focus=CNI:Kube-OVN ./test/e2e/kube-ovn/kube-ovn.test -- $(TEST_BIN_ARGS)
 
 .PHONY: kube-ovn-ic-conformance-e2e
@@ -260,6 +267,15 @@ kube-ovn-ipsec-cert-mgr-e2e:
 .PHONY: kube-ovn-anp-e2e
 kube-ovn-anp-e2e:
 	KUBECONFIG=$(KUBECONFIG) ./test/anp/conformance.sh
+
+.PHONY: kube-ovn-anp-domain-e2e
+kube-ovn-anp-domain-e2e:
+	ginkgo build $(E2E_BUILD_FLAGS) ./test/e2e/anp-domain
+	E2E_BRANCH=$(E2E_BRANCH) \
+	E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
+	E2E_NETWORK_MODE=$(E2E_NETWORK_MODE) \
+	ginkgo $(GINKGO_OUTPUT_OPT) $(GINKGO_PARALLEL_OPT) --randomize-all -v --timeout=30m \
+		--focus=CNI:Kube-OVN ./test/e2e/anp-domain/anp-domain.test -- $(TEST_BIN_ARGS)
 
 .PHONY: kube-ovn-connectivity-e2e
 kube-ovn-connectivity-e2e:

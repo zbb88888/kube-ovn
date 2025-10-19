@@ -12,11 +12,11 @@ concurrency:
 env:
   GO_VERSION: ''
   # renovate: datasource=github-releases depName=kind packageName=kubernetes-sigs/kind
-  KIND_VERSION: v0.29.0
+  KIND_VERSION: v0.30.0
   # renovate: datasource=github-releases depName=helm packageName=helm/helm
-  HELM_VERSION: v3.18.4
+  HELM_VERSION: v3.19.0
   # renovate: datasource=github-releases depName=submariner packageName=submariner-io/submariner
-  SUBMARINER_VERSION: 0.20.1
+  SUBMARINER_VERSION: 0.21.0
 
 jobs:
   k8s-conformance-e2e:
@@ -40,14 +40,14 @@ jobs:
           - overlay
           - underlay
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Remove DNS search domain
         run: |
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -70,7 +70,7 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -130,14 +130,14 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Remove DNS search domain
         run: |
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -160,7 +160,7 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -216,7 +216,7 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Remove DNS search domain
         run: |
@@ -227,7 +227,7 @@ jobs:
         run: mkdir -p test/e2e/k8s-network/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -283,8 +283,8 @@ jobs:
           - overlay
           - underlay
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -307,7 +307,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -363,8 +363,8 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -387,7 +387,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -441,13 +441,13 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -496,13 +496,13 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -553,13 +553,13 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -611,9 +611,9 @@ jobs:
           - release-1.11
           - release-1.12-mc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -636,7 +636,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -689,9 +689,9 @@ jobs:
           - release-1.12-mc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -714,7 +714,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -765,9 +765,9 @@ jobs:
           - release-1.13
           - release-1.12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -790,7 +790,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -842,13 +842,13 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -895,8 +895,8 @@ jobs:
           - release-1.12
           - release-1.11
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4.3.0
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4.3.1
         with:
           version: '${{ env.HELM_VERSION }}'
 
@@ -905,7 +905,7 @@ jobs:
           sudo sed -i '/^search/d' /etc/resolv.conf
           sudo systemctl restart docker
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -928,7 +928,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -998,8 +998,8 @@ jobs:
           - ipv6
           - dual
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -1022,7 +1022,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -1085,12 +1085,12 @@ jobs:
           - release-1.12 => master
           - release-1.13 => master
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4.3.0
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4.3.1
         with:
           version: '${{ env.HELM_VERSION }}'
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -1119,13 +1119,13 @@ jobs:
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ env.VERSION_FROM }}
           fetch-depth: 1
           path: test/e2e/kube-ovn/branches/${{ env.VERSION_FROM }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ env.VERSION_TO }}
           fetch-depth: 1
@@ -1188,13 +1188,13 @@ jobs:
           - release-1.13
           - release-1.12
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create branch directory
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -1251,8 +1251,8 @@ jobs:
           - release-1.13
           - release-1.12
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -1275,7 +1275,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1
@@ -1327,8 +1327,8 @@ jobs:
           - release-1.12
           - release-1.12-mc
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION || '' }}
           go-version-file: go.mod
@@ -1351,7 +1351,7 @@ jobs:
         run: mkdir -p test/e2e/kube-ovn/branches/${{ matrix.branch }}
 
       - name: Check out branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ matrix.branch }}
           fetch-depth: 1

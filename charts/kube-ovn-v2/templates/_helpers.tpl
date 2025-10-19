@@ -72,7 +72,7 @@ Get IP-addresses of master nodes
   {{- end -}}
   {{- end }}
 {{- end -}}
-{{- if eq (len $ips) 0 -}}
+{{- if and (eq (len $ips) 0) (not $.Values.masterNodes) -}}
   {{- fail (printf "No nodes found with label '%s'. Please check your masterNodesLabels configuration or ensure master nodes are properly labeled." $.Values.masterNodesLabels) -}}
 {{- end -}}
 {{ join "," $ips }}
@@ -126,7 +126,9 @@ Get IPs of master nodes from values
     {{- $imageVersion := (index $ds.spec.template.spec.containers 0).image | splitList ":" | last | trimPrefix "v" -}}
     {{- $versionRegex := `^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)` -}}
     {{- if and (ne $newChartVersion $chartVersion) (regexMatch $versionRegex $imageVersion) -}}
-      {{- if regexFind $versionRegex $imageVersion | semverCompare ">= 1.13.0" -}}
+      {{- if regexFind $versionRegex $imageVersion | semverCompare ">= 1.15.0" -}}
+        25.03
+      {{- else if regexFind $versionRegex $imageVersion | semverCompare ">= 1.13.0" -}}
         24.03
       {{- else if regexFind $versionRegex $imageVersion | semverCompare ">= 1.12.0" -}}
         22.12

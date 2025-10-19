@@ -26,6 +26,11 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
+const (
+	NetworkPolicyEnforcementStandard = "standard"
+	NetworkPolicyEnforcementLax      = "lax"
+)
+
 func (c *Controller) enqueueAddNp(obj any) {
 	key := cache.MetaObjectToName(obj.(*netv1.NetworkPolicy)).String()
 	klog.V(3).Infof("enqueue add network policy %s", key)
@@ -33,7 +38,23 @@ func (c *Controller) enqueueAddNp(obj any) {
 }
 
 func (c *Controller) enqueueDeleteNp(obj any) {
-	key := cache.MetaObjectToName(obj.(*netv1.NetworkPolicy)).String()
+	var np *netv1.NetworkPolicy
+	switch t := obj.(type) {
+	case *netv1.NetworkPolicy:
+		np = t
+	case cache.DeletedFinalStateUnknown:
+		n, ok := t.Obj.(*netv1.NetworkPolicy)
+		if !ok {
+			klog.Warningf("unexpected object type: %T", t.Obj)
+			return
+		}
+		np = n
+	default:
+		klog.Warningf("unexpected type: %T", obj)
+		return
+	}
+
+	key := cache.MetaObjectToName(np).String()
 	klog.V(3).Infof("enqueue delete network policy %s", key)
 	c.deleteNpQueue.Add(key)
 }
@@ -157,6 +178,26 @@ func (c *Controller) handleUpdateNp(key string) error {
 	}
 
 	if hasIngressRule(np) {
+		if protocolSet.Size() > 0 {
+			enforcementLax := c.isNetworkPolicyEnforcementLax(np)
+
+			blockACLOps, err := c.OVNNbClient.UpdateDefaultBlockACLOps(key, pgName, ovnnb.ACLDirectionToLport, logEnable, enforcementLax)
+			if err != nil {
+				klog.Errorf("failed to set default ingress block acl: %v", err)
+				return fmt.Errorf("failed to set default ingress block acl: %w", err)
+			}
+			ingressACLOps = append(ingressACLOps, blockACLOps...)
+
+			if enforcementLax {
+				defaultBlockExceptions, err := c.OVNNbClient.UpdateDefaultBlockExceptionsACLOps(key, pgName, np.Namespace, ovnnb.ACLDirectionToLport)
+				if err != nil {
+					klog.Errorf("failed to set default block exceptions for ingress acl: %v", err)
+					return fmt.Errorf("failed to set default block exceptions for ingress acl: %w", err)
+				}
+				ingressACLOps = append(ingressACLOps, defaultBlockExceptions...)
+			}
+		}
+
 		for _, protocol := range protocolSet.List() {
 			for idx, npr := range np.Spec.Ingress {
 				// A single address set must contain addresses of the same type and the name must be unique within table, so IPv4 and IPv6 address set should be different
@@ -198,7 +239,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					npp = npr.Ports
 				}
 
-				ops, err := c.OVNNbClient.UpdateIngressACLOps(key, pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateIngressACLOps(pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add ingress acls to np %s: %v", key, err)
 					return err
@@ -220,7 +261,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					return err
 				}
 
-				ops, err := c.OVNNbClient.UpdateIngressACLOps(key, pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateIngressACLOps(pgName, ingressAllowAsName, ingressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add ingress acls to np %s: %v", key, err)
 					return err
@@ -286,6 +327,26 @@ func (c *Controller) handleUpdateNp(key string) error {
 	}
 
 	if hasEgressRule(np) {
+		if protocolSet.Size() > 0 {
+			enforcementLax := c.isNetworkPolicyEnforcementLax(np)
+
+			blockACLOps, err := c.OVNNbClient.UpdateDefaultBlockACLOps(key, pgName, ovnnb.ACLDirectionFromLport, logEnable, enforcementLax)
+			if err != nil {
+				klog.Errorf("failed to set default egress block acl: %v", err)
+				return fmt.Errorf("failed to set default egress block acl: %w", err)
+			}
+			egressACLOps = append(egressACLOps, blockACLOps...)
+
+			if enforcementLax {
+				defaultBlockExceptions, err := c.OVNNbClient.UpdateDefaultBlockExceptionsACLOps(key, pgName, np.Namespace, ovnnb.ACLDirectionFromLport)
+				if err != nil {
+					klog.Errorf("failed to set default block exceptions for ingress acl: %v", err)
+					return fmt.Errorf("failed to set default block exceptions for ingress acl: %w", err)
+				}
+				egressACLOps = append(egressACLOps, defaultBlockExceptions...)
+			}
+		}
+
 		for _, protocol := range protocolSet.List() {
 			for idx, npr := range np.Spec.Egress {
 				// A single address set must contain addresses of the same type and the name must be unique within table, so IPv4 and IPv6 address set should be different
@@ -327,7 +388,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					npp = npr.Ports
 				}
 
-				ops, err := c.OVNNbClient.UpdateEgressACLOps(key, pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateEgressACLOps(pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, npp, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add egress acls to np %s: %v", key, err)
 					return err
@@ -349,7 +410,7 @@ func (c *Controller) handleUpdateNp(key string) error {
 					return err
 				}
 
-				ops, err := c.OVNNbClient.UpdateEgressACLOps(key, pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
+				ops, err := c.OVNNbClient.UpdateEgressACLOps(pgName, egressAllowAsName, egressExceptAsName, protocol, aclName, nil, logEnable, logActions, namedPortMap)
 				if err != nil {
 					klog.Errorf("generate operations that add egress acls to np %s: %v", key, err)
 					return err
@@ -759,4 +820,14 @@ func isNamespaceMatchNetworkPolicy(ns *corev1.Namespace, policy *netv1.NetworkPo
 		}
 	}
 	return false
+}
+
+func (c *Controller) isNetworkPolicyEnforcementLax(policy *netv1.NetworkPolicy) bool {
+	// User provided a custom enforcement through annotations
+	if value, ok := policy.Annotations[util.NetworkPolicyEnforcementAnnotation]; ok {
+		return value == NetworkPolicyEnforcementLax
+	}
+
+	// Fallback to the configuration of the controller
+	return c.config.NetworkPolicyEnforcement == NetworkPolicyEnforcementLax
 }

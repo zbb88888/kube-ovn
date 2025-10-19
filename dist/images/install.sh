@@ -13,10 +13,11 @@ VLAN_NIC=${VLAN_NIC:-}
 HW_OFFLOAD=${HW_OFFLOAD:-false}
 ENABLE_LB=${ENABLE_LB:-true}
 ENABLE_NP=${ENABLE_NP:-true}
+NP_ENFORCEMENT=${NP_ENFORCEMENT:-standard}
 ENABLE_EIP_SNAT=${ENABLE_EIP_SNAT:-true}
 LS_DNAT_MOD_DL_DST=${LS_DNAT_MOD_DL_DST:-true}
 LS_CT_SKIP_DST_LPORT_IPS=${LS_CT_SKIP_DST_LPORT_IPS:-true}
-ENABLE_EXTERNAL_VPC=${ENABLE_EXTERNAL_VPC:-true}
+ENABLE_EXTERNAL_VPC=${ENABLE_EXTERNAL_VPC:-false}
 CNI_CONFIG_PRIORITY=${CNI_CONFIG_PRIORITY:-01}
 ENABLE_LB_SVC=${ENABLE_LB_SVC:-false}
 ENABLE_NAT_GW=${ENABLE_NAT_GW:-true}
@@ -45,6 +46,7 @@ CERT_MANAGER_IPSEC_CERT=${CERT_MANAGER_IPSEC_CERT:-false}
 IPSEC_CERT_DURATION=${IPSEC_CERT_DURATION:-63072000} # 2 years in seconds
 CERT_MANAGER_ISSUER_NAME=${CERT_MANAGER_ISSUER_NAME:-kube-ovn}
 ENABLE_ANP=${ENABLE_ANP:-false}
+ENABLE_DNS_NAME_RESOLVER=${ENABLE_DNS_NAME_RESOLVER:-false}
 SET_VXLAN_TX_OFF=${SET_VXLAN_TX_OFF:-false}
 OVSDB_CON_TIMEOUT=${OVSDB_CON_TIMEOUT:-3}
 OVSDB_INACTIVITY_TIMEOUT=${OVSDB_INACTIVITY_TIMEOUT:-10}
@@ -501,8 +503,9 @@ spec:
                                     type: array
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - preference
                               - weight
@@ -593,8 +596,9 @@ spec:
                                   - topologyKey
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - podAffinityTerm
                               - weight
@@ -681,8 +685,9 @@ spec:
                                   - topologyKey
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - podAffinityTerm
                               - weight
@@ -747,6 +752,8 @@ spec:
                     type: string
                 qosPolicy:
                   type: string
+                noDefaultEIP:
+                  type: boolean
                 bgpSpeaker:
                   type: object
                   properties:
@@ -771,6 +778,16 @@ spec:
                     extraArgs:
                       type: array
                       items:
+                        type: string
+                routes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      cidr:
+                        type: string
+                        format: cidr
+                      nextHopIP:
                         type: string
                 tolerations:
                   type: array
@@ -837,8 +854,9 @@ spec:
                                     type: array
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - preference
                               - weight
@@ -929,8 +947,9 @@ spec:
                                   - topologyKey
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - podAffinityTerm
                               - weight
@@ -1017,8 +1036,9 @@ spec:
                                   - topologyKey
                                 type: object
                               weight:
-                                format: int32
                                 type: integer
+                                minimum: 1
+                                maximum: 100
                             required:
                               - podAffinityTerm
                               - weight
@@ -1135,7 +1155,8 @@ spec:
               properties:
                 replicas:
                   type: integer
-                  format: int32
+                  minimum: 0
+                  maximum: 10
                 labelSelector:
                   type: string
                 conditions:
@@ -1151,7 +1172,6 @@ spec:
                         maxLength: 32768
                         type: string
                       observedGeneration:
-                        format: int64
                         minimum: 0
                         type: integer
                       reason:
@@ -1232,7 +1252,6 @@ spec:
               properties:
                 replicas:
                   type: integer
-                  format: int32
                   default: 1
                   minimum: 0
                   maximum: 10
@@ -1280,16 +1299,19 @@ spec:
                       default: false
                     minRX:
                       type: integer
-                      format: int32
                       default: 1000
+                      minimum: 1
+                      maximum: 3600000
                     minTX:
                       type: integer
-                      format: int32
                       default: 1000
+                      minimum: 1
+                      maximum: 3600000
                     multiplier:
                       type: integer
-                      format: int32
                       default: 3
+                      minimum: 1
+                      maximum: 3600000
                 selectors:
                   type: array
                   items:
@@ -2505,6 +2527,9 @@ spec:
       served: true
       storage: true
       additionalPrinterColumns:
+      - name: Namespace
+        type: string
+        jsonPath: .spec.namespace
       - name: V4IP
         type: string
         jsonPath: .status.v4ip
@@ -3499,6 +3524,8 @@ rules:
       - switch-lb-rules/status
       - vpc-dnses
       - vpc-dnses/status
+      - dnsnameresolvers
+      - dnsnameresolvers/status
       - qos-policies
       - qos-policies/status
     verbs:
@@ -3816,21 +3843,21 @@ metadata:
   name: secret-reader-ovn-ipsec
   namespace: kube-system
 rules:
-- apiGroups: 
+- apiGroups:
     - ""
-  resources: 
+  resources:
     - "secrets"
   resourceNames:
     - "ovn-ipsec-ca"
-  verbs: 
+  verbs:
     - "get"
     - "list"
     - "watch"
-- apiGroups: 
+- apiGroups:
     - "cert-manager.io"
-  resources: 
+  resources:
     - "certificaterequests"
-  verbs: 
+  verbs:
     - "get"
     - "list"
     - "create"
@@ -4665,6 +4692,7 @@ spec:
           - --pod-nic-type=$POD_NIC_TYPE
           - --enable-lb=$ENABLE_LB
           - --enable-np=$ENABLE_NP
+          - --np-enforcement=$NP_ENFORCEMENT
           - --enable-eip-snat=$ENABLE_EIP_SNAT
           - --enable-external-vpc=$ENABLE_EXTERNAL_VPC
           - --logtostderr=false
@@ -4681,6 +4709,7 @@ spec:
           - --cert-manager-ipsec-cert=$CERT_MANAGER_IPSEC_CERT
           - --secure-serving=${SECURE_SERVING}
           - --enable-anp=$ENABLE_ANP
+          - --enable-dns-name-resolver=$ENABLE_DNS_NAME_RESOLVER
           - --ovsdb-con-timeout=$OVSDB_CON_TIMEOUT
           - --ovsdb-inactivity-timeout=$OVSDB_INACTIVITY_TIMEOUT
           - --enable-live-migration-optimize=$ENABLE_LIVE_MIGRATION_OPTIMIZE

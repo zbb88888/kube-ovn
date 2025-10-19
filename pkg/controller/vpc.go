@@ -51,6 +51,10 @@ func (c *Controller) enqueueUpdateVpc(oldObj, newObj any) {
 	oldVpc := oldObj.(*kubeovnv1.Vpc)
 	newVpc := newObj.(*kubeovnv1.Vpc)
 
+	if newVpc.Labels != nil && newVpc.Labels[util.VpcExternalLabel] == "true" {
+		return
+	}
+
 	if !newVpc.DeletionTimestamp.IsZero() ||
 		!slices.Equal(oldVpc.Spec.Namespaces, newVpc.Spec.Namespaces) ||
 		!reflect.DeepEqual(oldVpc.Spec.StaticRoutes, newVpc.Spec.StaticRoutes) ||
@@ -75,7 +79,22 @@ func (c *Controller) enqueueUpdateVpc(oldObj, newObj any) {
 }
 
 func (c *Controller) enqueueDelVpc(obj any) {
-	vpc := obj.(*kubeovnv1.Vpc)
+	var vpc *kubeovnv1.Vpc
+	switch t := obj.(type) {
+	case *kubeovnv1.Vpc:
+		vpc = t
+	case cache.DeletedFinalStateUnknown:
+		v, ok := t.Obj.(*kubeovnv1.Vpc)
+		if !ok {
+			klog.Warningf("unexpected object type: %T", t.Obj)
+			return
+		}
+		vpc = v
+	default:
+		klog.Warningf("unexpected type: %T", obj)
+		return
+	}
+
 	if _, ok := vpc.Labels[util.VpcExternalLabel]; !vpc.Status.Default || !ok {
 		klog.V(3).Infof("enqueue delete vpc %s", vpc.Name)
 		c.delVpcQueue.Add(vpc)
@@ -1104,7 +1123,7 @@ func diffStaticRoute(exist []*ovnnb.LogicalRouterStaticRoute, target []*kubeovnv
 	for _, item := range existRouteMap {
 		routeNeedDel = append(routeNeedDel, item)
 	}
-	return
+	return routeNeedDel, routeNeedAdd, err
 }
 
 func getStaticRouteItemKey(item *kubeovnv1.StaticRoute) string {
@@ -1253,7 +1272,7 @@ func (c *Controller) getVpcSubnets(vpc *kubeovnv1.Vpc) (subnets []string, defaul
 		}
 	}
 	sort.Strings(subnets)
-	return
+	return subnets, defaultSubnet, err
 }
 
 // createVpcRouter create router to connect logical switches in vpc

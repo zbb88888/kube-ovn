@@ -187,7 +187,7 @@ features:
   enableNetworkPolicies: true
   # -- Enable external VPCs
   # @section -- Opt-in/out Features
-  enableExternalVpcs: true
+  enableExternalVpcs: false
   # -- Enable hardware offloads
   # @section -- Opt-in/out Features
   enableHardwareOffload: false
@@ -223,6 +223,7 @@ features:
   LS_DNAT_MOD_DL_DST: true
   LS_CT_SKIP_DST_LPORT_IPS: true
   ENABLE_ANP: false
+  ENABLE_DNS_NAME_RESOLVER: false
   SET_VXLAN_TX_OFF: false
   OVSDB_CON_TIMEOUT: 3
   OVSDB_INACTIVITY_TIMEOUT: 10
@@ -251,6 +252,11 @@ cni:
   # Should be a string representing a double-digit integer.
   # @section -- CNI configuration
   configPriority: "01"
+  # -- Whether to use Kube-OVN as non-primary CNI. When set to true, Kube-OVN will not allocate/handle primary network interfaces.
+  # Interfaces are created using Network Attachment Definitions (NADs)
+  # @section -- CNI configuration
+  nonPrimaryCNI: false
+
 
 # -- Configuration of the validating webhook used to verify custom resources before they are pushed to Kubernetes.
 # Make sure cert-manager is installed for the generation of certificates for the webhook.
@@ -305,6 +311,18 @@ natGw:
     # See https://kubeovn.github.io/docs/stable/en/advance/with-bgp/
     # @section -- NAT gateways configuration
     apiNadProvider: "{{ .Values.apiNad.name }}.{{ .Values.namespace }}.ovn"
+
+
+# -- Configuration for network policies
+# @section -- Network Policies
+# @default -- "{}"
+networkPolicies:
+  # -- Enforcement level of network policies when they get applied (can be: standard, lax).
+  # Enforcement "standard" blocks everything except what is allowed by the network policies.
+  # Enforcement "lax" is similar to "standard" with the exception that ARP/DHCPv4/DHCPv6/ICMPv4/ICMPv6
+  # is allowed by default. This mode is useful when using Kubevirt and VMs with IPs configured via Kube-OVN's DHCP.
+  # @section -- Network Policies
+  enforcement: "standard"
 
 # -- API NetworkAttachmentDefinition to give some pods (CoreDNS, NAT GW) in custom VPCs access to the K8S API.
 # This requires Multus to be installed.
@@ -370,6 +388,8 @@ ovsOvn:
   # -- Directory on the node where Open vSwitch (OVS) lives.
   # @section -- OVS/OVN daemons configuration
   ovsDirectory: "/etc/origin/openvswitch"
+  # -- Directory on the node where Open vSwitch (OVS) IPSEC keys live.
+  ovsIpsecKeysDirectory: "/etc/origin/ovs_ipsec_keys"
   # -- Directory on the node where Open Virtual Network (OVN) lives.
   # @section -- OVS/OVN daemons configuration
   ovnDirectory: "/etc/origin/ovn"

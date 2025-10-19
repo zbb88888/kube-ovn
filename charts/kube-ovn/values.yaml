@@ -57,7 +57,8 @@ networking:
 func:
   ENABLE_LB: true
   ENABLE_NP: true
-  ENABLE_EXTERNAL_VPC: true
+  NP_ENFORCEMENT: standard
+  ENABLE_EXTERNAL_VPC: false
   HW_OFFLOAD: false
   ENABLE_LB_SVC: false
   ENABLE_KEEP_VM_IP: true
@@ -73,6 +74,7 @@ func:
   ENABLE_NAT_GW: true
   ENABLE_OVN_IPSEC: false
   ENABLE_ANP: false
+  ENABLE_DNS_NAME_RESOLVER: false
   SET_VXLAN_TX_OFF: false
   OVSDB_CON_TIMEOUT: 3
   OVSDB_INACTIVITY_TIMEOUT: 10
@@ -119,6 +121,7 @@ cni_conf:
   CNI_CONF_FILE: "/kube-ovn/01-kube-ovn.conflist"
   LOCAL_BIN_DIR: "/usr/local/bin"
   MOUNT_LOCAL_BIN_DIR: false
+  NON_PRIMARY_CNI: false
 
 kubelet_conf:
   KUBELET_DIR: "/var/lib/kubelet"
@@ -127,6 +130,7 @@ log_conf:
   LOG_DIR: "/var/log"
 
 OPENVSWITCH_DIR: "/etc/origin/openvswitch"
+OVN_IPSEC_KEY_DIR: "/etc/origin/ovs_ipsec_keys"
 OVN_DIR: "/etc/origin/ovn"
 DISABLE_MODULES_MANAGEMENT: false
 

@@ -1,10 +1,10 @@
 SHELL = /bin/bash
 
-include build.mk
-include ut.mk
-include kind.mk
-include talos.mk
-include e2e.mk
+include makefiles/build.mk
+include makefiles/ut.mk
+include makefiles/kind.mk
+include makefiles/talos.mk
+include makefiles/e2e.mk
 
 COMMA = ,
 
@@ -34,7 +34,7 @@ METALLB_CONTROLLER_IMAGE = quay.io/metallb/controller:$(METALLB_VERSION)
 METALLB_SPEAKER_IMAGE = quay.io/metallb/speaker:$(METALLB_VERSION)
 
 # renovate: datasource=github-releases depName=kubevirt packageName=kubevirt/kubevirt
-KUBEVIRT_VERSION = v1.6.0
+KUBEVIRT_VERSION = v1.6.2
 KUBEVIRT_OPERATOR_IMAGE = quay.io/kubevirt/virt-operator:$(KUBEVIRT_VERSION)
 KUBEVIRT_API_IMAGE = quay.io/kubevirt/virt-api:$(KUBEVIRT_VERSION)
 KUBEVIRT_CONTROLLER_IMAGE = quay.io/kubevirt/virt-controller:$(KUBEVIRT_VERSION)
@@ -44,11 +44,11 @@ KUBEVIRT_OPERATOR_YAML = https://github.com/kubevirt/kubevirt/releases/download/
 KUBEVIRT_CR_YAML = https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-cr.yaml
 
 # renovate: datasource=github-releases depName=cilium packageName=cilium/cilium
-CILIUM_VERSION = v1.18.0
+CILIUM_VERSION = v1.18.2
 CILIUM_IMAGE_REPO = quay.io/cilium
 
 # renovate: datasource=github-releases depName=cert-manager packageName=cert-manager/cert-manager
-CERT_MANAGER_VERSION = v1.18.2
+CERT_MANAGER_VERSION = v1.19.1
 CERT_MANAGER_CONTROLLER = quay.io/jetstack/cert-manager-controller:$(CERT_MANAGER_VERSION)
 CERT_MANAGER_CAINJECTOR = quay.io/jetstack/cert-manager-cainjector:$(CERT_MANAGER_VERSION)
 CERT_MANAGER_WEBHOOK = quay.io/jetstack/cert-manager-webhook:$(CERT_MANAGER_VERSION)
@@ -78,9 +78,9 @@ KWOK_VERSION = v0.7.0
 KWOK_IMAGE = registry.k8s.io/kwok/kwok:$(KWOK_VERSION)
 
 ANP_TEST_IMAGE = registry.k8s.io/e2e-test-images/agnhost:2.45
-ANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/heads/main/config/crd/experimental/policy.networking.k8s.io_adminnetworkpolicies.yaml
-BANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/heads/main/config/crd/experimental/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml
-
+NETWORK_POLICY_API_VERSION = v0.1.7
+ANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/tags/$(NETWORK_POLICY_API_VERSION)/config/crd/experimental/policy.networking.k8s.io_adminnetworkpolicies.yaml
+BANP_CR_YAML = https://raw.githubusercontent.com/kubernetes-sigs/network-policy-api/refs/tags/$(NETWORK_POLICY_API_VERSION)/config/crd/experimental/policy.networking.k8s.io_baselineadminnetworkpolicies.yaml
 define docker_ensure_image_exists
 	if ! docker images --format "{{.Repository}}:{{.Tag}}" | grep "^$(1)$$" >/dev/null; then \
 		docker pull "$(1)"; \
