@@ -190,6 +190,11 @@ func (c *Controller) enqueueAddPod(obj any) {
 		return
 	}
 
+	if util.IgnoreCalicoPod(p) {
+		klog.Infof("ignore add calico pod %s/%s", p.Namespace, p.Name)
+		return
+	}
+
 	// TODO: we need to find a way to reduce duplicated np added to the queue
 	if c.config.EnableNP {
 		c.namedPort.AddNamedPortByPod(p)
@@ -259,6 +264,11 @@ func (c *Controller) enqueueDeletePod(obj any) {
 		return
 	}
 
+	if util.IgnoreCalicoPod(p) {
+		klog.Infof("ignore del calico pod %s/%s", p.Namespace, p.Name)
+		return
+	}
+
 	if c.config.EnableNP {
 		c.namedPort.DeleteNamedPortByPod(p)
 		for _, np := range c.podMatchNetworkPolicies(p) {
@@ -280,6 +290,11 @@ func (c *Controller) enqueueDeletePod(obj any) {
 func (c *Controller) enqueueUpdatePod(oldObj, newObj any) {
 	oldPod := oldObj.(*v1.Pod)
 	newPod := newObj.(*v1.Pod)
+
+	if util.IgnoreCalicoPod(newPod) {
+		klog.Infof("ignore update calico pod %s/%s", newPod.Namespace, newPod.Name)
+		return
+	}
 
 	if oldPod.Annotations[util.AAPsAnnotation] != "" || newPod.Annotations[util.AAPsAnnotation] != "" {
 		oldAAPs := strings.Split(oldPod.Annotations[util.AAPsAnnotation], ",")
