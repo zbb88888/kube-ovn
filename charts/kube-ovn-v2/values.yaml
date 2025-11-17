@@ -7,10 +7,7 @@ global:
   images:
     kubeovn:
       repository: kube-ovn
-      vpcRepository: vpc-nat-gateway
       tag: v1.14.0
-      support_arm: true
-      thirdparty: true
 
 # -- Image configuration.
 # @section -- Global parameters
@@ -85,12 +82,16 @@ networking:
       # -- IPv6 gateway.
       # @section -- Network parameters of the CNI
       v6: "fd00:10:16::1"
-    # -- Enable default gateway checks
+    # -- Enable default gateway checks.
     # @section -- Network parameters of the CNI
     enableGatewayChecks: true
-    # -- Enable logical gateways
+    # -- Enable logical gateways.
     # @section -- Network parameters of the CNI
     enableLogicalGateways: false
+    # -- MTU of the subnet.
+    # If set to 0, the MTU is auto-detected.
+    # @section -- Network parameters of the CNI
+    mtu: 0
   # -- Configuration for the service subnet.
   # If .networking.stack is set to IPv4, only the .v4 key is used.
   # If .networking.stack is set to IPv6, only the .v6 key is used.
@@ -154,6 +155,9 @@ networking:
   # -- Comma-separated string of NodeLocal DNS IP addresses.
   # @section -- Network parameters of the CNI
   nodeLocalDnsIp: ""
+  # -- Comma-separated list of destination IP CIDRs that should skip conntrack processing.
+  # @section -- Network parameters of the CNI
+  skipConntrackDstCidrs: ""
   # -- Enable listening on the metrics endpoint for the CNI daemons.
   # @section -- Network parameters of the CNI
   enableMetrics: true
@@ -257,7 +261,6 @@ cni:
   # @section -- CNI configuration
   nonPrimaryCNI: false
 
-
 # -- Configuration of the validating webhook used to verify custom resources before they are pushed to Kubernetes.
 # Make sure cert-manager is installed for the generation of certificates for the webhook.
 # See https://kubeovn.github.io/docs/stable/en/guide/webhook/
@@ -289,6 +292,19 @@ natGw:
   # manually destroyed and recreated.
   # @section -- NAT gateways configuration
   namePrefix: "vpc-nat-gw"
+  # -- Image used by the NAT gateway.
+  # @section -- NAT gateways configuration
+  # @default -- "{}"
+  image:
+    # -- Image repository.
+    # @section -- NAT gateways configuration
+    repository: docker.io/kubeovn/vpc-nat-gateway
+    # -- Image tag.
+    # @section -- NAT gateways configuration
+    tag: v1.15.0
+    # -- Image pull policy.
+    # @section -- NAT gateways configuration
+    pullPolicy: IfNotPresent
   # -- Configuration of the BGP sidecar for when a NAT gateway is running in BGP mode.
   # @section -- NAT gateways configuration
   # @default -- "{}"
@@ -311,7 +327,6 @@ natGw:
     # See https://kubeovn.github.io/docs/stable/en/advance/with-bgp/
     # @section -- NAT gateways configuration
     apiNadProvider: "{{ .Values.apiNad.name }}.{{ .Values.namespace }}.ovn"
-
 
 # -- Configuration for network policies
 # @section -- Network Policies
