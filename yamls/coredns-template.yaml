@@ -20,6 +20,7 @@ spec:
     spec:
       priorityClassName: system-cluster-critical
       serviceAccountName: vpc-dns
+      automountServiceAccountToken: true
       tolerations:
         - key: "CriticalAddonsOnly"
           operator: "Exists"
@@ -36,6 +37,9 @@ spec:
                     operator: In
                     values: ["{{ .DeployName }}"]
                  topologyKey: kubernetes.io/hostname
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: coredns
         image: {{ .CorednsImage }}

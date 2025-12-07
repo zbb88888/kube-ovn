@@ -49,9 +49,10 @@ type SubnetSpec struct {
 	ExcludeIps []string `json:"excludeIps,omitempty"`
 	Provider   string   `json:"provider,omitempty"`
 
-	GatewayType string `json:"gatewayType,omitempty"`
-	GatewayNode string `json:"gatewayNode"`
-	NatOutgoing bool   `json:"natOutgoing"`
+	GatewayType          string                 `json:"gatewayType,omitempty"`
+	GatewayNode          string                 `json:"gatewayNode"`
+	GatewayNodeSelectors []metav1.LabelSelector `json:"gatewayNodeSelectors,omitempty"`
+	NatOutgoing          bool                   `json:"natOutgoing"`
 
 	ExternalEgressGateway string `json:"externalEgressGateway,omitempty"`
 	PolicyRoutingPriority uint32 `json:"policyRoutingPriority,omitempty"`
@@ -89,6 +90,7 @@ type SubnetSpec struct {
 
 	RouteTable         string                 `json:"routeTable,omitempty"`
 	NamespaceSelectors []metav1.LabelSelector `json:"namespaceSelectors,omitempty"`
+	NodeNetwork        string                 `json:"nodeNetwork,omitempty"`
 }
 
 type ACL struct {

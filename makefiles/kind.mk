@@ -1,9 +1,11 @@
 # Makefile for managing kind environments
 
+UNTAINT_CONTROL_PLANE ?= true
+
 VPC_NAT_GW_IMG = $(REGISTRY)/vpc-nat-gateway:$(VERSION)
 
 # Cilium configuration variables (fallback if not defined in main Makefile)
-CILIUM_VERSION ?= v1.18.1
+CILIUM_VERSION ?= v1.18.4
 CILIUM_IMAGE_REPO ?= quay.io/cilium
 
 OS_LINUX = 0
@@ -210,6 +212,7 @@ kind-init-bgp: kind-clean-bgp kind-init
 		--name kube-ovn-bgp \
 		--network host \
 		--pid host \
+		-v /lib/modules:/lib/modules:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v /var/run/netns:/var/run/netns \
 		-v /var/lib/docker/containers:/var/lib/docker/containers \
@@ -223,6 +226,7 @@ kind-init-bgp-ha: kind-clean-bgp kind-init
 		--name kube-ovn-bgp \
 		--network host \
 		--pid host \
+		-v /lib/modules:/lib/modules:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v /var/run/netns:/var/run/netns \
 		-v /var/lib/docker/containers:/var/lib/docker/containers \
@@ -252,7 +256,9 @@ kind-upgrade-chart-v2: kind-load-image upgrade-chart-v2
 .PHONY: kind-install
 kind-install: kind-load-image
 	kubectl config use-context kind-kube-ovn
-	@$(MAKE) untaint-control-plane
+	@if [ "$(UNTAINT_CONTROL_PLANE)" = "true" ]; then \
+		$(MAKE) untaint-control-plane; \
+	fi
 	sed 's/VERSION=.*/VERSION=$(VERSION)/' dist/images/install.sh | bash
 	kubectl describe no
 
@@ -302,8 +308,6 @@ kind-install-ovn-ic-ipv4:
 	kubectl config use-context kind-kube-ovn1
 	@$(MAKE) untaint-control-plane
 	sed -e 's/10.16.0/10.18.0/g' \
-		-e 's/10.96.0/10.98.0/g' \
-		-e 's/100.64.0/100.68.0/g' \
 		-e 's/VERSION=.*/VERSION=$(VERSION)/' \
 		dist/images/install.sh | ENABLE_IC=true bash
 	kubectl describe no
@@ -333,8 +337,6 @@ kind-install-ovn-ic-ipv6:
 	kubectl config use-context kind-kube-ovn1
 	@$(MAKE) untaint-control-plane
 	sed -e 's/fd00:10:16:/fd00:10:18:/g' \
-		-e 's/fd00:10:96:/fd00:10:98:/g' \
-		-e 's/fd00:100:64:/fd00:100:68:/g' \
 		-e 's/VERSION=.*/VERSION=$(VERSION)/' \
 		dist/images/install.sh | \
 		IPV6=true ENABLE_IC=true bash
@@ -352,11 +354,7 @@ kind-install-ovn-ic-dual:
 	kubectl config use-context kind-kube-ovn1
 	@$(MAKE) untaint-control-plane
 	sed -e 's/10.16.0/10.18.0/g' \
-		-e 's/10.96.0/10.98.0/g' \
-		-e 's/100.64.0/100.68.0/g' \
 		-e 's/fd00:10:16:/fd00:10:18:/g' \
-		-e 's/fd00:10:96:/fd00:10:98:/g' \
-		-e 's/fd00:100:64:/fd00:100:68:/g' \
 		-e 's/VERSION=.*/VERSION=$(VERSION)/' \
 		dist/images/install.sh | \
 		DUAL_STACK=true ENABLE_IC=true bash
@@ -798,6 +796,7 @@ kind-clean-bgp: kind-clean-bgp-ha
 		--name kube-ovn-bgp \
 		--network host \
 		--pid host \
+		-v /lib/modules:/lib/modules:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v /var/run/netns:/var/run/netns \
 		-v /var/lib/docker/containers:/var/lib/docker/containers \
@@ -812,6 +811,7 @@ kind-clean-bgp-ha:
 		--name kube-ovn-bgp \
 		--network host \
 		--pid host \
+		-v /lib/modules:/lib/modules:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v /var/run/netns:/var/run/netns \
 		-v /var/lib/docker/containers:/var/lib/docker/containers \

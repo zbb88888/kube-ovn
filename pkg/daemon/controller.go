@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,8 +59,9 @@ type Controller struct {
 	updatePodQueue workqueue.TypedRateLimitingInterface[string]
 	deletePodQueue workqueue.TypedRateLimitingInterface[*podEvent]
 
-	nodesLister listerv1.NodeLister
-	nodesSynced cache.InformerSynced
+	nodesLister     listerv1.NodeLister
+	nodesSynced     cache.InformerSynced
+	updateNodeQueue workqueue.TypedRateLimitingInterface[string]
 
 	servicesLister listerv1.ServiceLister
 	servicesSynced cache.InformerSynced
@@ -131,8 +131,9 @@ func NewController(config *Configuration,
 		updatePodQueue: newTypedRateLimitingQueue[string]("UpdatePod", nil),
 		deletePodQueue: newTypedRateLimitingQueue[*podEvent]("DeletePod", nil),
 
-		nodesLister: nodeInformer.Lister(),
-		nodesSynced: nodeInformer.Informer().HasSynced,
+		nodesLister:     nodeInformer.Lister(),
+		nodesSynced:     nodeInformer.Informer().HasSynced,
+		updateNodeQueue: newTypedRateLimitingQueue[string]("UpdateNode", nil),
 
 		servicesLister: servicesInformer.Lister(),
 		servicesSynced: servicesInformer.Informer().HasSynced,
@@ -206,6 +207,11 @@ func NewController(config *Configuration,
 	}); err != nil {
 		return nil, err
 	}
+	if _, err = nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: controller.enqueueUpdateNode,
+	}); err != nil {
+		return nil, err
+	}
 
 	return controller, nil
 }
@@ -227,6 +233,18 @@ func (c *Controller) enqueueUpdateIPSecCA(oldObj, newObj any) {
 	key := cache.MetaObjectToName(newSecret).String()
 	klog.V(3).Infof("enqueue update CA %s", key)
 	c.ipsecQueue.Add(key)
+}
+
+func (c *Controller) enqueueUpdateNode(oldObj, newObj any) {
+	oldNode := oldObj.(*v1.Node)
+	newNode := newObj.(*v1.Node)
+	if newNode.Name != c.config.NodeName {
+		return
+	}
+	if oldNode.Annotations[util.NodeNetworksAnnotation] != newNode.Annotations[util.NodeNetworksAnnotation] {
+		klog.V(3).Infof("enqueue update node %s for node networks change", newNode.Name)
+		c.updateNodeQueue.Add(newNode.Name)
+	}
 }
 
 func (c *Controller) enqueueAddProviderNetwork(obj any) {
@@ -378,6 +396,20 @@ func (c *Controller) initProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v1
 	// always add trunk 0 so that the ovs bridge can communicate with the external network
 	vlans.Add("0")
 
+	if pn.Spec.AutoCreateVlanSubinterfaces && strings.Contains(nic, ".") {
+		parts := strings.SplitN(nic, ".", 2)
+		parentIf := parts[0]
+		if !util.CheckInterfaceExists(nic) {
+			klog.Infof("Auto-create enabled: creating default VLAN subinterface %s on %s", nic, parentIf)
+			if err := c.createVlanSubinterfaces([]string{nic}, parentIf, pn.Name); err != nil {
+				klog.Errorf("Failed to create default VLAN subinterface %s: %v", nic, err)
+				return err
+			}
+		} else {
+			klog.V(3).Infof("Default VLAN subinterface %s already exists, skipping creation", nic)
+		}
+	}
+
 	var mtu int
 	var err error
 	klog.V(3).Infof("ovs init provider network %s", pn.Name)
@@ -464,6 +496,11 @@ func (c *Controller) cleanProviderNetwork(pn *kubeovnv1.ProviderNetwork, node *v
 func (c *Controller) handleDeleteProviderNetwork(pn *kubeovnv1.ProviderNetwork) error {
 	if err := c.ovsCleanProviderNetwork(pn.Name); err != nil {
 		klog.Error(err)
+		return err
+	}
+
+	if err := c.cleanupAutoCreatedVlanInterfaces(pn.Name); err != nil {
+		klog.Errorf("Failed to cleanup auto-created VLAN interfaces for provider %s: %v", pn.Name, err)
 		return err
 	}
 
@@ -782,6 +819,47 @@ func (c *Controller) processNextIPSecWorkItem() bool {
 	return true
 }
 
+func (c *Controller) runUpdateNodeWorker() {
+	for c.processNextUpdateNodeWorkItem() {
+	}
+}
+
+func (c *Controller) processNextUpdateNodeWorkItem() bool {
+	key, shutdown := c.updateNodeQueue.Get()
+	if shutdown {
+		return false
+	}
+
+	err := func(key string) error {
+		defer c.updateNodeQueue.Done(key)
+		if err := c.handleUpdateNode(key); err != nil {
+			c.updateNodeQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing node %q: %w, requeuing", key, err)
+		}
+		c.updateNodeQueue.Forget(key)
+		return nil
+	}(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+	return true
+}
+
+func (c *Controller) handleUpdateNode(key string) error {
+	node, err := c.nodesLister.Get(key)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		klog.Error(err)
+		return err
+	}
+
+	klog.Infof("updating node networks for node %s", key)
+	return c.config.UpdateNodeNetworks(node)
+}
+
 // Run starts controller
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -792,6 +870,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer c.updatePodQueue.ShutDown()
 	defer c.deletePodQueue.ShutDown()
 	defer c.ipsecQueue.ShutDown()
+	defer c.updateNodeQueue.ShutDown()
 	go wait.Until(c.gcInterfaces, time.Minute, stopCh)
 	go wait.Until(recompute, 10*time.Minute, stopCh)
 	go wait.Until(rotateLog, 1*time.Hour, stopCh)
@@ -810,6 +889,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go wait.Until(c.runSubnetWorker, time.Second, stopCh)
 	go wait.Until(c.runUpdatePodWorker, time.Second, stopCh)
 	go wait.Until(c.runDeletePodWorker, time.Second, stopCh)
+	go wait.Until(c.runUpdateNodeWorker, time.Second, stopCh)
 	go wait.Until(c.runIPSecWorker, 3*time.Second, stopCh)
 	go wait.Until(c.runGateway, 3*time.Second, stopCh)
 	go wait.Until(c.loopEncapIPCheck, 3*time.Second, stopCh)
@@ -842,8 +922,8 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 }
 
 func recompute() {
-	output, err := exec.Command("ovn-appctl", "-t", "ovn-controller", "inc-engine/recompute").CombinedOutput()
+	output, err := ovs.Appctl(ovs.OvnController, "inc-engine/recompute")
 	if err != nil {
-		klog.Errorf("failed to recompute ovn-controller %q", output)
+		klog.Errorf("failed to trigger force recompute for %s: %q", ovs.OvnController, output)
 	}
 }

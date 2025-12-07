@@ -97,6 +97,7 @@ const (
 	LogicalSwitchAnnotation = "ovn.kubernetes.io/logical_switch"
 
 	TunnelInterfaceAnnotation = "ovn.kubernetes.io/tunnel_interface"
+	NodeNetworksAnnotation    = "ovn.kubernetes.io/node_networks"
 
 	OvsDpTypeLabel = "ovn.kubernetes.io/ovs_dp_type"
 
@@ -116,12 +117,10 @@ const (
 	NetworkPolicyLogAnnotation         = "ovn.kubernetes.io/enable_log"
 	NetworkPolicyEnforcementAnnotation = "ovn.kubernetes.io/network_policy_enforcement"
 	ACLActionsLogAnnotation            = "ovn.kubernetes.io/log_acl_actions"
+	ACLLogMeterAnnotation              = "ovn.kubernetes.io/acl_log_meter_rate"
 
 	VpcEgressGatewayLabel  = "ovn.kubernetes.io/vpc-egress-gateway"
 	GenerateHashAnnotation = "ovn.kubernetes.io/generate-hash"
-
-	VpcLastName     = "ovn.kubernetes.io/last_vpc_name"
-	VpcLastPolicies = "ovn.kubernetes.io/last_policies"
 
 	ServiceExternalIPFromSubnetAnnotation = "ovn.kubernetes.io/service_external_ip_from_subnet"
 	ServiceHealthCheck                    = "ovn.kubernetes.io/service_health_check"

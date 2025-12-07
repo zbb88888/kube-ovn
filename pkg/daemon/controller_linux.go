@@ -691,8 +691,17 @@ func (c *Controller) getPolicyRouting(subnet *kubeovnv1.Subnet) ([]netlink.Rule,
 	if subnet == nil || subnet.Spec.ExternalEgressGateway == "" || subnet.Spec.Vpc != c.config.ClusterRouter {
 		return nil, nil, nil
 	}
-	if subnet.Spec.GatewayType == kubeovnv1.GWCentralizedType && !util.GatewayContains(subnet.Spec.GatewayNode, c.config.NodeName) {
-		return nil, nil, nil
+	if subnet.Spec.GatewayType == kubeovnv1.GWCentralizedType {
+		node, err := c.nodesLister.Get(c.config.NodeName)
+		if err != nil {
+			klog.Errorf("failed to get node %s: %v", c.config.NodeName, err)
+			return nil, nil, err
+		}
+		isGatewayNode := util.GatewayContains(subnet.Spec.GatewayNode, c.config.NodeName) ||
+			(subnet.Spec.GatewayNode == "" && util.MatchLabelSelectors(subnet.Spec.GatewayNodeSelectors, node.Labels))
+		if !isGatewayNode {
+			return nil, nil, nil
+		}
 	}
 
 	protocols := make([]string, 1, 2)
@@ -1047,9 +1056,9 @@ func (c *Controller) loopEncapIPCheck() {
 		c.config.Iface = nodeTunnelName
 		klog.Infof("Update node tunnel interface %v", nodeTunnelName)
 
-		encapIP := strings.Split(addrs[0].String(), "/")[0]
-		if err = setEncapIP(encapIP); err != nil {
-			klog.Errorf("failed to set encap ip %s for iface %s", encapIP, c.config.Iface)
+		c.config.DefaultEncapIP = strings.Split(addrs[0].String(), "/")[0]
+		if err = c.config.setEncapIPs(); err != nil {
+			klog.Errorf("failed to set encap ip %s for iface %s", c.config.DefaultEncapIP, c.config.Iface)
 			return
 		}
 	}

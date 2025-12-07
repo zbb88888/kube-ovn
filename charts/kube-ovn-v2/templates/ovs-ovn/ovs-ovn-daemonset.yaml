@@ -47,8 +47,12 @@ spec:
           operator: Exists
       priorityClassName: system-node-critical
       serviceAccountName: ovn-ovs
+      automountServiceAccountToken: true
       hostNetwork: true
       hostPID: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: hostpath-init
           image: {{ .Values.global.registry.address }}/{{ .Values.global.images.kubeovn.repository }}:{{ .Values.global.images.kubeovn.tag }}
@@ -57,6 +61,7 @@ spec:
             - sh
             - -xec
             - |
+              chmod +t /usr/local/sbin
               chown -R nobody: /var/run/ovn /var/log/ovn /etc/openvswitch /var/run/openvswitch /var/log/openvswitch
               iptables -V
               {{- if not .Values.ovsOvn.disableModulesManagement }}

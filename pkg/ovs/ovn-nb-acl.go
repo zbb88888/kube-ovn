@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
-	"k8s.io/utils/set"
 
 	v1alpha1 "sigs.k8s.io/network-policy-api/apis/v1alpha1"
 
@@ -54,9 +53,10 @@ func setACLName(acl *ovnnb.ACL, name string) {
 }
 
 // UpdateDefaultBlockACLOps returns operations to update/create the default block ACL
-func (c *OVNNbClient) UpdateDefaultBlockACLOps(npName, pgName, direction string, loggingEnabled, lax bool) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateDefaultBlockACLOps(npName, pgName, direction string, loggingEnabled, lax bool, logRate int) ([]ovsdb.Operation, error) {
 	portDirection := "outport"
 	priority := util.IngressDefaultDrop
+	meterName := fmt.Sprintf("%s_%s_meter", pgName, direction)
 
 	if direction == ovnnb.ACLDirectionFromLport {
 		portDirection = "inport"
@@ -84,6 +84,9 @@ func (c *OVNNbClient) UpdateDefaultBlockACLOps(npName, pgName, direction string,
 		if loggingEnabled {
 			acl.Log = true
 			acl.Severity = ptr.To(ovnnb.ACLSeverityWarning)
+			if loggingEnabled && logRate > 0 {
+				acl.Meter = ptr.To(meterName)
+			}
 		}
 
 		if direction == ovnnb.ACLDirectionFromLport {
@@ -91,6 +94,17 @@ func (c *OVNNbClient) UpdateDefaultBlockACLOps(npName, pgName, direction string,
 				acl.Options = make(map[string]string)
 			}
 			acl.Options["apply-after-lb"] = "true"
+		}
+	}
+
+	if loggingEnabled && logRate > 0 {
+		if err := c.CreateOrUpdateMeter(meterName, ovnnb.MeterUnitPktps, logRate, 1); err != nil {
+			klog.Errorf("failed to create meter %s: %v", meterName, err)
+			return nil, fmt.Errorf("create meter %s: %w", meterName, err)
+		}
+	} else {
+		if err := c.DeleteMeter(meterName); err != nil {
+			klog.Errorf("failed to delete meter %s: %v", meterName, err)
 		}
 	}
 
@@ -172,8 +186,18 @@ func (c *OVNNbClient) UpdateDefaultBlockExceptionsACLOps(npName, pgName, npNames
 }
 
 // UpdateIngressACLOps return operation that creates an ingress ACL
-func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, logRate int, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
 	acls := make([]*ovnnb.ACL, 0)
+	meterName := fmt.Sprintf("%s_%s_meter", pgName, ovnnb.ACLDirectionToLport)
+	if logEnable && logRate > 0 {
+		if err := c.CreateOrUpdateMeter(meterName, ovnnb.MeterUnitPktps, logRate, 1); err != nil {
+			return nil, fmt.Errorf("create ingress meter %s: %w", meterName, err)
+		}
+	} else {
+		if err := c.DeleteMeter(meterName); err != nil {
+			klog.Errorf("failed to delete ingress meter %s: %v", meterName, err)
+		}
+	}
 
 	/* allow acl */
 	matches := newNetworkPolicyACLMatch(pgName, asIngressName, asExceptName, protocol, ovnnb.ACLDirectionToLport, npp, namedPortMap)
@@ -182,6 +206,9 @@ func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, p
 			setACLName(acl, aclName)
 			if logEnable && slices.Contains(logACLActions, ovnnb.ACLActionAllow) {
 				acl.Log = true
+				if logEnable && logRate > 0 {
+					acl.Meter = ptr.To(meterName)
+				}
 			}
 		}
 
@@ -204,8 +231,18 @@ func (c *OVNNbClient) UpdateIngressACLOps(pgName, asIngressName, asExceptName, p
 }
 
 // UpdateEgressACLOps return operation that creates an egress ACL
-func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
+func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, protocol, aclName string, npp []netv1.NetworkPolicyPort, logEnable bool, logACLActions []ovnnb.ACLAction, logRate int, namedPortMap map[string]*util.NamedPortInfo) ([]ovsdb.Operation, error) {
 	acls := make([]*ovnnb.ACL, 0)
+	meterName := fmt.Sprintf("%s_%s_meter", pgName, ovnnb.ACLDirectionFromLport)
+	if logEnable && logRate > 0 {
+		if err := c.CreateOrUpdateMeter(meterName, ovnnb.MeterUnitPktps, logRate, 1); err != nil {
+			return nil, fmt.Errorf("create egress meter %s: %w", meterName, err)
+		}
+	} else {
+		if err := c.DeleteMeter(meterName); err != nil {
+			klog.Errorf("failed to delete egress meter %s: %v", meterName, err)
+		}
+	}
 
 	/* allow acl */
 	matches := newNetworkPolicyACLMatch(pgName, asEgressName, asExceptName, protocol, ovnnb.ACLDirectionFromLport, npp, namedPortMap)
@@ -218,6 +255,9 @@ func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, pro
 			acl.Options["apply-after-lb"] = "true"
 			if logEnable && slices.Contains(logACLActions, ovnnb.ACLActionAllow) {
 				acl.Log = true
+				if logEnable && logRate > 0 {
+					acl.Meter = ptr.To(meterName)
+				}
 			}
 		})
 		if err != nil {
@@ -237,10 +277,11 @@ func (c *OVNNbClient) UpdateEgressACLOps(pgName, asEgressName, asExceptName, pro
 	return ops, nil
 }
 
-// CreateGatewayACL create allow acl for subnet gateway
-func (c *OVNNbClient) CreateGatewayACL(lsName, pgName, gateway, u2oInterconnectionIP string) error {
-	acls := make([]*ovnnb.ACL, 0)
-
+// CreateGatewayACL create ICMPv6 allow acl for IPv6 gateway detection
+// This function should only be called when IPv6 is present
+// For IPv4: uses ARP (L2), no ACL needed
+// For IPv6: uses ping (ICMPv6), needs ICMPv6 protocol ACL
+func (c *OVNNbClient) CreateGatewayACL(lsName, pgName string) error {
 	var parentName, parentType string
 	switch {
 	case len(pgName) != 0:
@@ -251,54 +292,28 @@ func (c *OVNNbClient) CreateGatewayACL(lsName, pgName, gateway, u2oInterconnecti
 		return errors.New("one of port group name and logical switch name must be specified")
 	}
 
-	gateways := set.New(strings.Split(gateway, ",")...)
-	if u2oInterconnectionIP != "" {
-		gateways = gateways.Insert(strings.Split(u2oInterconnectionIP, ",")...)
-	}
-
 	options := func(acl *ovnnb.ACL) {
 		if acl.Options == nil {
 			acl.Options = make(map[string]string)
 		}
 		acl.Options["apply-after-lb"] = "true"
 	}
-	v6Exists := false
-	for gw := range gateways {
-		protocol := util.CheckProtocol(gw)
-		ipSuffix := "ip4"
-		if protocol == kubeovnv1.ProtocolIPv6 {
-			ipSuffix = "ip6"
-			v6Exists = true
-		}
 
-		allowIngressACL, err := c.newACL(parentName, ovnnb.ACLDirectionToLport, util.IngressAllowPriority, fmt.Sprintf("%s.src == %s", ipSuffix, gw), ovnnb.ACLActionAllowStateless, util.NetpolACLTier)
-		if err != nil {
-			klog.Error(err)
-			return fmt.Errorf("new allow ingress acl for %s: %w", parentName, err)
-		}
-
-		allowEgressACL, err := c.newACL(parentName, ovnnb.ACLDirectionFromLport, util.EgressAllowPriority, fmt.Sprintf("%s.dst == %s", ipSuffix, gw), ovnnb.ACLActionAllowStateless, util.NetpolACLTier, options)
-		if err != nil {
-			klog.Error(err)
-			return fmt.Errorf("new allow egress acl for %s: %w", parentName, err)
-		}
-
-		acls = append(acls, allowIngressACL, allowEgressACL)
-	}
-
-	if v6Exists {
-		ndACL, err := c.newACL(parentName, ovnnb.ACLDirectionFromLport, util.EgressAllowPriority, "nd || nd_ra || nd_rs", ovnnb.ACLActionAllowStateless, util.NetpolACLTier, options)
-		if err != nil {
-			klog.Error(err)
-			return fmt.Errorf("new nd acl for %s: %w", parentName, err)
-		}
-
-		acls = append(acls, ndACL)
-	}
-
-	if err := c.CreateAcls(parentName, parentType, acls...); err != nil {
+	icmpv6EgressACL, err := c.newACL(parentName, ovnnb.ACLDirectionFromLport, util.EgressAllowPriority, "icmp6", ovnnb.ACLActionAllowStateless, util.NetpolACLTier, options)
+	if err != nil {
 		klog.Error(err)
-		return fmt.Errorf("add gateway acls to %s: %w", pgName, err)
+		return fmt.Errorf("new icmpv6 egress acl for %s: %w", parentName, err)
+	}
+
+	icmpv6IngressACL, err := c.newACL(parentName, ovnnb.ACLDirectionToLport, util.IngressAllowPriority, "icmp6", ovnnb.ACLActionAllowStateless, util.NetpolACLTier)
+	if err != nil {
+		klog.Error(err)
+		return fmt.Errorf("new icmpv6 ingress acl for %s: %w", parentName, err)
+	}
+
+	if err := c.CreateAcls(parentName, parentType, icmpv6EgressACL, icmpv6IngressACL); err != nil {
+		klog.Error(err)
+		return fmt.Errorf("add gateway acls to %s: %w", parentName, err)
 	}
 
 	return nil

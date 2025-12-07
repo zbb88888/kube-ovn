@@ -71,7 +71,7 @@ func (csh cniServerHandler) configureDpdkNic(podName, podNamespace, provider, ne
 	return ovs.SetInterfaceBandwidth(podName, podNamespace, ifaceID, egress, ingress)
 }
 
-func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns, containerID, vfDriver, ifName, mac string, mtu int, ip, gateway string, isDefaultRoute, vmMigration bool, routes []request.Route, _, _ []string, ingress, egress, deviceID, latency, limit, loss, jitter string, gwCheckMode int, u2oInterconnectionIP, oldPodName string) ([]request.Route, error) {
+func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns, containerID, vfDriver, ifName, mac string, mtu int, ip, gateway string, isDefaultRoute, vmMigration bool, routes []request.Route, _, _ []string, ingress, egress, deviceID, latency, limit, loss, jitter string, gwCheckMode int, u2oInterconnectionIP, oldPodName, encapIP string) ([]request.Route, error) {
 	var err error
 	var hostNicName, containerNicName, pfPci string
 	var vfID int
@@ -103,28 +103,40 @@ func (csh cniServerHandler) configureNic(podName, podNamespace, provider, netns,
 	if yusur.IsYusurSmartNic(deviceID) {
 		klog.Infof("add Yusur smartnic vfr %s to ovs", hostNicName)
 		// Add yusur ovs port
-		output, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", hostNicName, "--",
+		args := []string{
+			ovs.MayExist, "add-port", "br-int", hostNicName, "--",
 			"set", "interface", hostNicName, "type=dpdk",
 			fmt.Sprintf("options:dpdk-devargs=%s,representor=[%d]", pfPci, vfID),
 			fmt.Sprintf("mtu_request=%d", mtu),
-			"external_ids:iface-id="+ifaceID,
-			"external_ids:vendor="+util.CniTypeName,
-			"external_ids:pod_name="+podName,
-			"external_ids:pod_namespace="+podNamespace,
-			"external_ids:ip="+ipStr,
-			"external_ids:pod_netns="+netns)
+			"external_ids:iface-id=" + ifaceID,
+			"external_ids:vendor=" + util.CniTypeName,
+			"external_ids:pod_name=" + podName,
+			"external_ids:pod_namespace=" + podNamespace,
+			"external_ids:ip=" + ipStr,
+			"external_ids:pod_netns=" + netns,
+		}
+		if encapIP != "" {
+			args = append(args, "external_ids:encap-ip="+encapIP)
+		}
+		output, err := ovs.Exec(args...)
 		if err != nil {
 			return nil, fmt.Errorf("add nic to ovs failed %w: %q", err, output)
 		}
 	} else {
 		// Add veth pair host end to ovs port
-		output, err := ovs.Exec(ovs.MayExist, "add-port", "br-int", hostNicName, "--",
-			"set", "interface", hostNicName, "external_ids:iface-id="+ifaceID,
-			"external_ids:vendor="+util.CniTypeName,
-			"external_ids:pod_name="+podName,
-			"external_ids:pod_namespace="+podNamespace,
-			"external_ids:ip="+ipStr,
-			"external_ids:pod_netns="+netns)
+		args := []string{
+			ovs.MayExist, "add-port", "br-int", hostNicName, "--",
+			"set", "interface", hostNicName, "external_ids:iface-id=" + ifaceID,
+			"external_ids:vendor=" + util.CniTypeName,
+			"external_ids:pod_name=" + podName,
+			"external_ids:pod_namespace=" + podNamespace,
+			"external_ids:ip=" + ipStr,
+			"external_ids:pod_netns=" + netns,
+		}
+		if encapIP != "" {
+			args = append(args, "external_ids:encap-ip="+encapIP)
+		}
+		output, err := ovs.Exec(args...)
 		if err != nil {
 			return nil, fmt.Errorf("add nic to ovs failed %w: %q", err, output)
 		}
@@ -604,7 +616,7 @@ func waitNetworkReady(nic, ipAddr, gateway string, verbose bool, maxRetry int, d
 				return err
 			}
 			if verbose {
-				klog.Infof("MAC addresses of gateway %s is %s", gw, mac.String())
+				klog.Infof("MAC address of gateway %s is %s", gw, mac.String())
 				klog.Infof("network %s with gateway %s is ready for interface %s after %d checks", ips[i], gw, nic, count)
 			}
 		} else {
@@ -1940,4 +1952,93 @@ func waitIPv6AddressPreferred(interfaceName string, maxRetry int, retryInterval 
 	}
 
 	return ret, nil
+}
+
+func (c *Controller) createVlanSubinterfaces(vlanInterfaces []string, baseInterface, providerName string) error {
+	if baseInterface == "" {
+		return errors.New("base interface is empty")
+	}
+	if !util.CheckInterfaceExists(baseInterface) {
+		return fmt.Errorf("base interface %s does not exist", baseInterface)
+	}
+
+	for _, vlanIfName := range vlanInterfaces {
+		klog.V(3).Infof("Processing VLAN interface creation for %s", vlanIfName)
+
+		parts := strings.SplitN(vlanIfName, ".", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid VLAN interface name format: %s (expected <interface>.<vlanid>)", vlanIfName)
+		}
+		parentIf := parts[0]
+		if parentIf != baseInterface {
+			return fmt.Errorf("vlan interface %s uses parent %s, which does not match default interface %s", vlanIfName, parentIf, baseInterface)
+		}
+
+		vlanID, err := util.ExtractVlanIDFromInterface(vlanIfName)
+		if err != nil {
+			return fmt.Errorf("failed to extract VLAN ID from interface name %s: %w", vlanIfName, err)
+		}
+
+		if util.CheckInterfaceExists(vlanIfName) {
+			klog.Infof("VLAN interface %s already exists, skipping creation", vlanIfName)
+			continue
+		}
+
+		klog.Infof("Creating VLAN interface %s (ID: %d) on %s", vlanIfName, vlanID, baseInterface)
+		output, err := exec.Command("ip", "link", "add", "link", baseInterface, "name", vlanIfName, "type", "vlan", "id", strconv.Itoa(vlanID)).CombinedOutput()
+		if err != nil {
+			klog.Errorf("Failed to create VLAN interface %s: %v, output: %s", vlanIfName, err, string(output))
+			return fmt.Errorf("failed to create VLAN interface %s: %w", vlanIfName, err)
+		}
+
+		if err := util.SetLinkUp(vlanIfName); err != nil {
+			klog.Errorf("Failed to set VLAN interface %s up: %v", vlanIfName, err)
+			if _, delErr := exec.Command("ip", "link", "delete", vlanIfName).CombinedOutput(); delErr != nil {
+				klog.Errorf("Failed to clean up VLAN interface %s: %v", vlanIfName, delErr)
+			}
+			return fmt.Errorf("failed to set VLAN interface %s up: %w", vlanIfName, err)
+		}
+
+		alias := fmt.Sprintf("kube-ovn:%s", providerName)
+		if output, err := exec.Command("ip", "link", "set", vlanIfName, "alias", alias).CombinedOutput(); err != nil {
+			klog.Errorf("Failed to set alias for interface %s: %v, output: %s", vlanIfName, err, string(output))
+			if _, delErr := exec.Command("ip", "link", "delete", vlanIfName).CombinedOutput(); delErr != nil {
+				klog.Errorf("Failed to clean up VLAN interface %s after alias set failure: %v", vlanIfName, delErr)
+			}
+			return fmt.Errorf("failed to set alias for interface %s: %w", vlanIfName, err)
+		}
+		klog.V(3).Infof("Set alias %s for VLAN interface %s", alias, vlanIfName)
+
+		klog.Infof("Successfully created VLAN interface %s (ID: %d) with alias %s", vlanIfName, vlanID, alias)
+	}
+
+	return nil
+}
+
+func (c *Controller) cleanupAutoCreatedVlanInterfaces(providerName string) error {
+	createdInterfaces, err := util.FindKubeOVNAutoCreatedInterfaces(providerName)
+	if err != nil {
+		return fmt.Errorf("failed to find auto-created interfaces for provider %s: %w", providerName, err)
+	}
+
+	if len(createdInterfaces) == 0 {
+		klog.V(3).Infof("No auto-created VLAN interfaces found for provider %s", providerName)
+		return nil
+	}
+
+	klog.Infof("Found %d auto-created VLAN interfaces to clean up for provider %s: %v", len(createdInterfaces), providerName, createdInterfaces)
+
+	// Delete each auto-created interface
+	for _, ifaceName := range createdInterfaces {
+		klog.Infof("Cleaning up auto-created VLAN interface %s", ifaceName)
+		output, err := exec.Command("ip", "link", "delete", ifaceName).CombinedOutput()
+		if err != nil {
+			klog.Warningf("Failed to delete auto-created VLAN interface %s: %v, output: %s", ifaceName, err, string(output))
+			// Continue with other interfaces even if deletion fails
+		} else {
+			klog.Infof("Successfully deleted auto-created VLAN interface %s", ifaceName)
+		}
+	}
+
+	return nil
 }
