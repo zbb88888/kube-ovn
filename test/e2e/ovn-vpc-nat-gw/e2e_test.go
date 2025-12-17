@@ -11,6 +11,7 @@ import (
 
 	dockernetwork "github.com/moby/moby/api/types/network"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -30,9 +31,13 @@ import (
 	"github.com/kubeovn/kube-ovn/test/e2e/framework/kind"
 )
 
-const dockerNetworkName = "kube-ovn-vlan"
-
-const dockerExtraNetworkName = "kube-ovn-extra-vlan"
+// Docker network configurations will be initialized in init() with random names and subnets
+var (
+	dockerNetworkName        string
+	dockerExtraNetworkName   string
+	dockerNetworkSubnet      string
+	dockerExtraNetworkSubnet string
+)
 
 func makeProviderNetwork(providerNetworkName string, exchangeLinkName bool, linkMap map[string]*iproute.Link) *kubeovnv1.ProviderNetwork {
 	var defaultInterface string
@@ -72,7 +77,24 @@ func makeOvnDnat(name, ovnEip, ipType, ipName, vpc, v4Ip, internalPort, external
 	return framework.MakeOvnDnatRule(name, ovnEip, ipType, ipName, vpc, v4Ip, internalPort, externalPort, protocol)
 }
 
-var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
+func makeExternalGatewayConfigMap(gwNodes, switchName string, cidr []string, gwType string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      util.ExternalGatewayConfig,
+			Namespace: framework.KubeOvnNamespace,
+		},
+		Data: map[string]string{
+			"enable-external-gw": "true",
+			"external-gw-nodes":  gwNodes,
+			"external-gw-switch": switchName,
+			"type":               gwType,
+			"external-gw-nic":    "eth1",
+			"external-gw-addr":   strings.Join(cidr, ","),
+		},
+	}
+}
+
+var _ = framework.SerialDescribe("[group:ovn-vpc-nat-gw]", func() {
 	f := framework.NewDefaultFramework("ovn-vpc-nat-gw")
 
 	var skip bool
@@ -127,57 +149,64 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		// gw node is 2 means e2e HA cluster will have 2 gw nodes and a worker node
 		// in this env, tcpdump gw nat flows will be more clear
 
-		noBfdVpcName = "no-bfd-vpc-" + framework.RandomSuffix()
-		bfdVpcName = "bfd-vpc-" + framework.RandomSuffix()
+		randomSuffix := framework.RandomSuffix()
+		// Use first 6 digits of random suffix for provider network names (12 byte limit)
+		shortSuffix := randomSuffix[:6]
+		noBfdVpcName = "no-bfd-vpc-" + randomSuffix
+		bfdVpcName = "bfd-vpc-" + randomSuffix
 
 		// nats use ip crd name or vip crd
-		fipName = "fip-" + framework.RandomSuffix()
+		fipName = "fip-" + randomSuffix
 
-		countingEipName = "counting-eip-" + framework.RandomSuffix()
-		noBfdSubnetName = "no-bfd-subnet-" + framework.RandomSuffix()
-		noBfdExtraSubnetName = "no-bfd-extra-subnet-" + framework.RandomSuffix()
-		lrpEipSnatName = "lrp-eip-snat-" + framework.RandomSuffix()
-		lrpExtraEipSnatName = "lrp-extra-eip-snat-" + framework.RandomSuffix()
-		bfdSubnetName = "bfd-subnet-" + framework.RandomSuffix()
+		countingEipName = "counting-eip-" + randomSuffix
+		noBfdSubnetName = "no-bfd-subnet-" + randomSuffix
+		noBfdExtraSubnetName = "no-bfd-extra-subnet-" + randomSuffix
+		lrpEipSnatName = "lrp-eip-snat-" + randomSuffix
+		lrpExtraEipSnatName = "lrp-extra-eip-snat-" + randomSuffix
+		bfdSubnetName = "bfd-subnet-" + randomSuffix
+		// Default external network must use fixed "external" name for global reuse
+		// kube-ovn-cni creates default external subnet with name "external" when enable-eip-snat
 		providerNetworkName = "external"
-		providerExtraNetworkName = "extra"
-		vlanName = "vlan-" + framework.RandomSuffix()
-		vlanExtraName = "vlan-extra-" + framework.RandomSuffix()
 		underlaySubnetName = "external"
-		underlayExtraSubnetName = "extra"
+		vlanName = "vlan"
+		// Extra network uses random suffix to test multi-external-subnet scenarios
+		// provider network name has 12 bytes limit, use short suffix
+		providerExtraNetworkName = "extra-" + shortSuffix
+		underlayExtraSubnetName = "extra-" + shortSuffix
+		vlanExtraName = "vlan-extra-" + randomSuffix
 
 		// sharing case
-		sharedVipName = "shared-vip-" + framework.RandomSuffix()
-		sharedEipDnatName = "shared-eip-dnat-" + framework.RandomSuffix()
-		sharedEipFipShoudOkName = "shared-eip-fip-should-ok-" + framework.RandomSuffix()
-		sharedEipFipShoudFailName = "shared-eip-fip-should-fail-" + framework.RandomSuffix()
+		sharedVipName = "shared-vip-" + randomSuffix
+		sharedEipDnatName = "shared-eip-dnat-" + randomSuffix
+		sharedEipFipShoudOkName = "shared-eip-fip-should-ok-" + randomSuffix
+		sharedEipFipShoudFailName = "shared-eip-fip-should-fail-" + randomSuffix
 
 		// pod with fip
-		fipPodName = "fip-pod-" + framework.RandomSuffix()
+		fipPodName = "fip-pod-" + randomSuffix
 		podEipName = fipPodName
 		podFipName = fipPodName
 
 		// pod with fip for extra external subnet
-		fipExtraPodName = "fip-extra-pod-" + framework.RandomSuffix()
+		fipExtraPodName = "fip-extra-pod-" + randomSuffix
 		podExtraEipName = fipExtraPodName
 		podExtraFipName = fipExtraPodName
 
 		// fip use ip addr
-		ipFipVipName = "ip-fip-vip-" + framework.RandomSuffix()
-		ipFipEipName = "ip-fip-eip-" + framework.RandomSuffix()
-		ipFipName = "ip-fip-" + framework.RandomSuffix()
+		ipFipVipName = "ip-fip-vip-" + randomSuffix
+		ipFipEipName = "ip-fip-eip-" + randomSuffix
+		ipFipName = "ip-fip-" + randomSuffix
 
 		// dnat use ip addr
-		ipDnatVipName = "ip-dnat-vip-" + framework.RandomSuffix()
-		ipDnatEipName = "ip-dnat-eip-" + framework.RandomSuffix()
-		ipDnatName = "ip-dnat-" + framework.RandomSuffix()
+		ipDnatVipName = "ip-dnat-vip-" + randomSuffix
+		ipDnatEipName = "ip-dnat-eip-" + randomSuffix
+		ipDnatName = "ip-dnat-" + randomSuffix
 
 		// snat use ip cidr
-		cidrSnatEipName = "cidr-snat-eip-" + framework.RandomSuffix()
-		cidrSnatName = "cidr-snat-" + framework.RandomSuffix()
-		ipSnatVipName = "ip-snat-vip-" + framework.RandomSuffix()
-		ipSnatEipName = "ip-snat-eip-" + framework.RandomSuffix()
-		ipSnatName = "ip-snat-" + framework.RandomSuffix()
+		cidrSnatEipName = "cidr-snat-eip-" + randomSuffix
+		cidrSnatName = "cidr-snat-" + randomSuffix
+		ipSnatVipName = "ip-snat-vip-" + randomSuffix
+		ipSnatEipName = "ip-snat-eip-" + randomSuffix
+		ipSnatName = "ip-snat-" + randomSuffix
 
 		if skip {
 			ginkgo.Skip("underlay spec only runs on kind clusters")
@@ -197,16 +226,16 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		}
 
 		if dockerNetwork == nil {
-			ginkgo.By("Ensuring docker network " + dockerNetworkName + " exists")
-			network, err := docker.NetworkCreate(dockerNetworkName, true, true)
-			framework.ExpectNoError(err, "creating docker network "+dockerNetworkName)
+			ginkgo.By("Ensuring docker network " + dockerNetworkName + " with subnet " + dockerNetworkSubnet + " exists")
+			network, err := docker.NetworkCreateWithSubnet(dockerNetworkName, dockerNetworkSubnet, true, true)
+			framework.ExpectNoError(err, "ensuring docker network "+dockerNetworkName+" exists")
 			dockerNetwork = network
 		}
 
 		if dockerExtraNetwork == nil {
-			ginkgo.By("Ensuring extra docker network " + dockerExtraNetworkName + " exists")
-			network, err := docker.NetworkCreate(dockerExtraNetworkName, true, true)
-			framework.ExpectNoError(err, "creating extra docker network "+dockerExtraNetworkName)
+			ginkgo.By("Ensuring extra docker network " + dockerExtraNetworkName + " with subnet " + dockerExtraNetworkSubnet + " exists")
+			network, err := docker.NetworkCreateWithSubnet(dockerExtraNetworkName, dockerExtraNetworkSubnet, true, true)
+			framework.ExpectNoError(err, "ensuring extra docker network "+dockerExtraNetworkName+" exists")
 			dockerExtraNetwork = network
 		}
 
@@ -437,6 +466,40 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		ginkgo.By("Deleting provider extra network " + providerExtraNetworkName)
 		providerNetworkClient.DeleteSync(providerExtraNetworkName)
 
+		ginkgo.By("Confirming provider networks are fully deleted")
+		startTime := time.Now()
+		checkCount := 0
+		framework.WaitUntil(2*time.Second, 2*time.Minute, func(_ context.Context) (bool, error) {
+			checkCount++
+			elapsed := time.Since(startTime)
+
+			pn, err := providerNetworkClient.ProviderNetworkInterface.Get(context.Background(), providerNetworkName, metav1.GetOptions{})
+			if err != nil && !k8serrors.IsNotFound(err) {
+				return false, err
+			}
+			if err == nil {
+				// Provider network still exists
+				framework.Logf("Warning: provider network %s still exists after %v (check #%d), DeletionTimestamp: %v",
+					providerNetworkName, elapsed, checkCount, pn.DeletionTimestamp)
+				return false, nil
+			}
+
+			extraPn, err := providerNetworkClient.ProviderNetworkInterface.Get(context.Background(), providerExtraNetworkName, metav1.GetOptions{})
+			if err != nil && !k8serrors.IsNotFound(err) {
+				return false, err
+			}
+			if err == nil {
+				// Extra provider network still exists
+				framework.Logf("Warning: provider extra network %s still exists after %v (check #%d), DeletionTimestamp: %v",
+					providerExtraNetworkName, elapsed, checkCount, extraPn.DeletionTimestamp)
+				return false, nil
+			}
+
+			// Both provider networks are deleted
+			framework.Logf("Provider networks fully deleted after %v (%d checks)", elapsed, checkCount)
+			return true, nil
+		}, "waiting for provider networks to be fully deleted")
+
 		ginkgo.By("Getting nodes")
 		nodes, err := kind.ListNodes(clusterName, "")
 		framework.ExpectNoError(err, "getting nodes in cluster")
@@ -470,11 +533,15 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		exchangeLinkName := false
 		itFn(exchangeLinkName, providerNetworkName, linkMap, &providerBridgeIps)
 
+		ginkgo.By("Verifying vlan " + vlanName + " does not exist from previous test")
+		_, err = vlanClient.VlanInterface.Get(context.Background(), vlanName, metav1.GetOptions{})
+		framework.ExpectTrue(k8serrors.IsNotFound(err), "vlan %s should not exist, AfterEach cleanup may have failed", vlanName)
+
 		ginkgo.By("Creating underlay vlan " + vlanName)
 		vlan := framework.MakeVlan(vlanName, providerNetworkName, 0)
 		_ = vlanClient.Create(vlan)
 
-		ginkgo.By("Creating underlay subnet " + underlaySubnetName)
+		ginkgo.By("Preparing subnet configuration for " + underlaySubnetName)
 		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
 		for _, config := range dockerNetwork.IPAM.Config {
 			switch util.CheckProtocol(config.Subnet.String()) {
@@ -511,14 +578,27 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		}
 		vlanSubnetCidr := strings.Join(cidr, ",")
 		vlanSubnetGw := strings.Join(gateway, ",")
+
+		ginkgo.By("Verifying subnet " + underlaySubnetName + " does not exist from previous test")
+		_, err = subnetClient.SubnetInterface.Get(context.Background(), underlaySubnetName, metav1.GetOptions{})
+		framework.ExpectTrue(k8serrors.IsNotFound(err), "subnet %s should not exist, AfterEach cleanup may have failed", underlaySubnetName)
+
+		ginkgo.By("Creating underlay subnet " + underlaySubnetName)
+		var oldUnderlayExternalSubnet *kubeovnv1.Subnet
 		underlaySubnet := framework.MakeSubnet(underlaySubnetName, vlanName, vlanSubnetCidr, vlanSubnetGw, "", "", excludeIPs, nil, nil)
-		oldUnderlayExternalSubnet := subnetClient.CreateSync(underlaySubnet)
+		oldUnderlayExternalSubnet = subnetClient.CreateSync(underlaySubnet)
 		countingEip := makeOvnEip(countingEipName, underlaySubnetName, "", "", "", "")
 		_ = ovnEipClient.CreateSync(countingEip)
 		ginkgo.By("Checking underlay vlan " + oldUnderlayExternalSubnet.Name)
 		framework.ExpectEqual(oldUnderlayExternalSubnet.Spec.Vlan, vlanName)
 		framework.ExpectNotEqual(oldUnderlayExternalSubnet.Spec.CIDRBlock, "")
-		time.Sleep(3 * time.Second)
+		ginkgo.By("Wait for ovn eip finalizer to be added")
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			eipCR := ovnEipClient.Get(countingEipName)
+			return eipCR != nil && len(eipCR.Finalizers) > 0, nil
+		}, "OvnEip should have finalizer added")
+		ginkgo.By("Wait for subnet status to be updated after ovn eip creation")
+		time.Sleep(5 * time.Second)
 		newUnerlayExternalSubnet := subnetClient.Get(underlaySubnetName)
 		ginkgo.By("Check status using ovn eip for subnet " + underlaySubnetName)
 		if newUnerlayExternalSubnet.Spec.Protocol == kubeovnv1.ProtocolIPv4 {
@@ -535,7 +615,8 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		// delete counting eip
 		oldUnderlayExternalSubnet = newUnerlayExternalSubnet
 		ovnEipClient.DeleteSync(countingEipName)
-		time.Sleep(3 * time.Second)
+		ginkgo.By("Wait for subnet status to be updated after ovn eip deletion")
+		time.Sleep(5 * time.Second)
 		newUnerlayExternalSubnet = subnetClient.Get(underlaySubnetName)
 		if newUnerlayExternalSubnet.Spec.Protocol == kubeovnv1.ProtocolIPv4 {
 			framework.ExpectEqual(oldUnderlayExternalSubnet.Status.V4AvailableIPs+1, newUnerlayExternalSubnet.Status.V4AvailableIPs)
@@ -551,20 +632,7 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 
 		externalGwNodes := strings.Join(gwNodeNames, ",")
 		ginkgo.By("Creating config map ovn-external-gw-config for centralized case")
-		cmData := map[string]string{
-			"enable-external-gw": "true",
-			"external-gw-nodes":  externalGwNodes,
-			"type":               kubeovnv1.GWCentralizedType,
-			"external-gw-nic":    "eth1",
-			"external-gw-addr":   strings.Join(cidr, ","),
-		}
-		configMap := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      util.ExternalGatewayConfig,
-				Namespace: framework.KubeOvnNamespace,
-			},
-			Data: cmData,
-		}
+		configMap := makeExternalGatewayConfigMap(externalGwNodes, underlaySubnetName, cidr, kubeovnv1.GWCentralizedType)
 		_, err = cs.CoreV1().ConfigMaps(framework.KubeOvnNamespace).Create(context.Background(), configMap, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "failed to create")
 
@@ -694,11 +762,15 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		framework.ExpectNoError(err, "getting extra docker network "+dockerExtraNetworkName)
 		itFn(exchangeLinkName, providerExtraNetworkName, extraLinkMap, &extraProviderBridgeIps)
 
+		ginkgo.By("Verifying extra vlan " + vlanExtraName + " does not exist from previous test")
+		_, err = vlanClient.VlanInterface.Get(context.Background(), vlanExtraName, metav1.GetOptions{})
+		framework.ExpectTrue(k8serrors.IsNotFound(err), "vlan %s should not exist, AfterEach cleanup may have failed", vlanExtraName)
+
 		ginkgo.By("Creating underlay extra vlan " + vlanExtraName)
 		vlan = framework.MakeVlan(vlanExtraName, providerExtraNetworkName, 0)
 		_ = vlanClient.Create(vlan)
 
-		ginkgo.By("Creating extra underlay subnet " + underlayExtraSubnetName)
+		ginkgo.By("Preparing extra subnet configuration for " + underlayExtraSubnetName)
 		cidrV4, cidrV6, gatewayV4, gatewayV6 = "", "", "", ""
 		for _, config := range dockerExtraNetwork.IPAM.Config {
 			switch util.CheckProtocol(config.Subnet.String()) {
@@ -736,6 +808,12 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 		}
 		extraVlanSubnetCidr := strings.Join(cidr, ",")
 		extraVlanSubnetGw := strings.Join(gateway, ",")
+
+		ginkgo.By("Verifying extra subnet " + underlayExtraSubnetName + " does not exist from previous test")
+		_, err = subnetClient.SubnetInterface.Get(context.Background(), underlayExtraSubnetName, metav1.GetOptions{})
+		framework.ExpectTrue(k8serrors.IsNotFound(err), "subnet %s should not exist, AfterEach cleanup may have failed", underlayExtraSubnetName)
+
+		ginkgo.By("Creating extra underlay subnet " + underlayExtraSubnetName)
 		underlayExtraSubnet := framework.MakeSubnet(underlayExtraSubnetName, vlanExtraName, extraVlanSubnetCidr, extraVlanSubnetGw, "", "", extraExcludeIPs, nil, nil)
 		_ = subnetClient.CreateSync(underlayExtraSubnet)
 		vlanExtraSubnet := subnetClient.Get(underlayExtraSubnetName)
@@ -939,21 +1017,8 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 			_ = podClient.CreateSync(pod)
 		}
 		ginkgo.By("3. Updating config map ovn-external-gw-config for distributed case")
-		cmData = map[string]string{
-			"enable-external-gw": "true",
-			"external-gw-nodes":  externalGwNodes,
-			"type":               kubeovnv1.GWDistributedType,
-			"external-gw-nic":    "eth1",
-			"external-gw-addr":   strings.Join(cidr, ","),
-		}
 		// TODO:// external-gw-nodes could be auto managed by recognizing gw chassis node which has the external-gw-nic
-		configMap = &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      util.ExternalGatewayConfig,
-				Namespace: framework.KubeOvnNamespace,
-			},
-			Data: cmData,
-		}
+		configMap = makeExternalGatewayConfigMap(externalGwNodes, underlaySubnetName, cidr, kubeovnv1.GWDistributedType)
 		_, err = cs.CoreV1().ConfigMaps(framework.KubeOvnNamespace).Update(context.Background(), configMap, metav1.UpdateOptions{})
 		framework.ExpectNoError(err, "failed to update ConfigMap")
 
@@ -1027,9 +1092,283 @@ var _ = framework.Describe("[group:ovn-vpc-nat-gw]", func() {
 			framework.ExpectHaveKeyWithValue(node.Labels, util.NodeExtGwLabel, "false")
 		}
 	})
+
+	// Helper function to wait for OvnEip to be ready
+	waitForOvnEipReady := func(eipClient *framework.OvnEipClient, eipName string, timeout time.Duration) *kubeovnv1.OvnEip {
+		ginkgo.GinkgoHelper()
+		var eip *kubeovnv1.OvnEip
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			eip = eipClient.Get(eipName)
+			if eip != nil && eip.Status.V4Ip != "" && eip.Status.Ready {
+				framework.Logf("OvnEip %s is ready with V4IP: %s", eipName, eip.Status.V4Ip)
+				return eip
+			}
+			time.Sleep(2 * time.Second)
+		}
+		framework.Failf("Timeout waiting for OvnEip %s to be ready", eipName)
+		return nil
+	}
+
+	framework.ConformanceIt("should properly manage OvnEip lifecycle with finalizer and update subnet status", func() {
+		f.SkipVersionPriorTo(1, 13, "This feature was introduced in v1.13")
+
+		ginkgo.By("Setting up provider network and underlay subnet")
+		network, err := docker.NetworkInspect(dockerNetworkName)
+		framework.ExpectNoError(err, "getting docker network "+dockerNetworkName)
+
+		exchangeLinkName := false
+		itFn(exchangeLinkName, providerNetworkName, linkMap, &providerBridgeIps)
+
+		ginkgo.By("Creating underlay vlan " + vlanName)
+		vlan := framework.MakeVlan(vlanName, providerNetworkName, 0)
+		_ = vlanClient.Create(vlan)
+
+		ginkgo.By("Creating underlay subnet " + underlaySubnetName)
+		var cidrV4, cidrV6, gatewayV4, gatewayV6 string
+		for _, config := range dockerNetwork.IPAM.Config {
+			switch util.CheckProtocol(config.Subnet.String()) {
+			case kubeovnv1.ProtocolIPv4:
+				if f.HasIPv4() {
+					cidrV4 = config.Subnet.String()
+					gatewayV4 = config.Gateway.String()
+				}
+			case kubeovnv1.ProtocolIPv6:
+				if f.HasIPv6() {
+					cidrV6 = config.Subnet.String()
+					gatewayV6 = config.Gateway.String()
+				}
+			}
+		}
+		cidr := make([]string, 0, 2)
+		gateway := make([]string, 0, 2)
+		if f.HasIPv4() {
+			cidr = append(cidr, cidrV4)
+			gateway = append(gateway, gatewayV4)
+		}
+		if f.HasIPv6() {
+			cidr = append(cidr, cidrV6)
+			gateway = append(gateway, gatewayV6)
+		}
+		excludeIPs := make([]string, 0, len(network.Containers)*2)
+		for _, container := range network.Containers {
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
+			}
+			if container.IPv6Address.IsValid() && f.HasIPv6() {
+				excludeIPs = append(excludeIPs, container.IPv6Address.Addr().String())
+			}
+		}
+		vlanSubnetCidr := strings.Join(cidr, ",")
+		vlanSubnetGw := strings.Join(gateway, ",")
+		underlaySubnet := framework.MakeSubnet(underlaySubnetName, vlanName, vlanSubnetCidr, vlanSubnetGw, "", "", excludeIPs, nil, nil)
+		_ = subnetClient.CreateSync(underlaySubnet)
+
+		ginkgo.By("Step 1: Recording initial underlay subnet status")
+		initialSubnet := subnetClient.Get(underlaySubnetName)
+		framework.Logf("Initial subnet status - V4: Available=%.0f Using=%.0f, V6: Available=%.0f Using=%.0f",
+			initialSubnet.Status.V4AvailableIPs, initialSubnet.Status.V4UsingIPs,
+			initialSubnet.Status.V6AvailableIPs, initialSubnet.Status.V6UsingIPs)
+
+		// Store initial status
+		initialV4Available := initialSubnet.Status.V4AvailableIPs
+		initialV4Using := initialSubnet.Status.V4UsingIPs
+		initialV6Available := initialSubnet.Status.V6AvailableIPs
+		initialV6Using := initialSubnet.Status.V6UsingIPs
+
+		ginkgo.By("Step 2: Creating OvnEip and waiting for it to be ready")
+		eipName := "test-ovn-eip-lifecycle-" + framework.RandomSuffix()
+		eip := makeOvnEip(eipName, underlaySubnetName, "", "", "", util.OvnEipTypeNAT)
+		_ = ovnEipClient.CreateSync(eip)
+
+		eipCR := waitForOvnEipReady(ovnEipClient, eipName, 2*time.Minute)
+		framework.ExpectNotEmpty(eipCR.Status.V4Ip, "OvnEip should have V4 IP assigned")
+
+		ginkgo.By("Step 3: Verifying finalizer is added to OvnEip")
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			eipCR = ovnEipClient.Get(eipName)
+			return eipCR != nil && len(eipCR.Finalizers) > 0, nil
+		}, "OvnEip should have finalizer added")
+		framework.ExpectContainElement(eipCR.Finalizers, util.KubeOVNControllerFinalizer,
+			"OvnEip must have controller finalizer")
+
+		ginkgo.By("Step 4: Verifying subnet status updated after OvnEip creation")
+		time.Sleep(5 * time.Second)
+		afterCreateSubnet := subnetClient.Get(underlaySubnetName)
+
+		// Verify based on protocol
+		protocol := afterCreateSubnet.Spec.Protocol
+		framework.Logf("Verifying subnet status for protocol: %s", protocol)
+
+		if protocol == kubeovnv1.ProtocolIPv4 || protocol == kubeovnv1.ProtocolDual {
+			framework.ExpectEqual(initialV4Available-1, afterCreateSubnet.Status.V4AvailableIPs,
+				"V4AvailableIPs should decrease by 1")
+			framework.ExpectEqual(initialV4Using+1, afterCreateSubnet.Status.V4UsingIPs,
+				"V4UsingIPs should increase by 1")
+			framework.ExpectTrue(strings.Contains(afterCreateSubnet.Status.V4UsingIPRange, eipCR.Status.V4Ip),
+				"EIP V4 IP should be in using range")
+		}
+		if protocol == kubeovnv1.ProtocolIPv6 || protocol == kubeovnv1.ProtocolDual {
+			framework.ExpectEqual(initialV6Available-1, afterCreateSubnet.Status.V6AvailableIPs,
+				"V6AvailableIPs should decrease by 1")
+			framework.ExpectEqual(initialV6Using+1, afterCreateSubnet.Status.V6UsingIPs,
+				"V6UsingIPs should increase by 1")
+		}
+
+		// Store after-create status
+		afterCreateV4Available := afterCreateSubnet.Status.V4AvailableIPs
+		afterCreateV4Using := afterCreateSubnet.Status.V4UsingIPs
+		afterCreateV6Available := afterCreateSubnet.Status.V6AvailableIPs
+		afterCreateV6Using := afterCreateSubnet.Status.V6UsingIPs
+
+		ginkgo.By("Step 5: Deleting OvnEip and verifying cleanup")
+		ovnEipClient.DeleteSync(eipName)
+
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			_, err := f.KubeOVNClientSet.KubeovnV1().OvnEips().Get(context.Background(), eipName, metav1.GetOptions{})
+			return k8serrors.IsNotFound(err), nil
+		}, "OvnEip should be deleted")
+
+		ginkgo.By("Step 6: Verifying subnet status restored after OvnEip deletion")
+		time.Sleep(5 * time.Second)
+		afterDeleteSubnet := subnetClient.Get(underlaySubnetName)
+
+		if protocol == kubeovnv1.ProtocolIPv4 || protocol == kubeovnv1.ProtocolDual {
+			framework.ExpectEqual(afterCreateV4Available+1, afterDeleteSubnet.Status.V4AvailableIPs,
+				"V4AvailableIPs should increase by 1")
+			framework.ExpectEqual(afterCreateV4Using-1, afterDeleteSubnet.Status.V4UsingIPs,
+				"V4UsingIPs should decrease by 1")
+			framework.ExpectEqual(initialV4Available, afterDeleteSubnet.Status.V4AvailableIPs,
+				"V4AvailableIPs should return to initial value")
+			framework.ExpectEqual(initialV4Using, afterDeleteSubnet.Status.V4UsingIPs,
+				"V4UsingIPs should return to initial value")
+		}
+		if protocol == kubeovnv1.ProtocolIPv6 || protocol == kubeovnv1.ProtocolDual {
+			framework.ExpectEqual(afterCreateV6Available+1, afterDeleteSubnet.Status.V6AvailableIPs,
+				"V6AvailableIPs should increase by 1")
+			framework.ExpectEqual(afterCreateV6Using-1, afterDeleteSubnet.Status.V6UsingIPs,
+				"V6UsingIPs should decrease by 1")
+			framework.ExpectEqual(initialV6Available, afterDeleteSubnet.Status.V6AvailableIPs,
+				"V6AvailableIPs should return to initial value")
+			framework.ExpectEqual(initialV6Using, afterDeleteSubnet.Status.V6UsingIPs,
+				"V6UsingIPs should return to initial value")
+		}
+
+		framework.Logf("OvnEip lifecycle test completed successfully")
+	})
+
+	framework.ConformanceIt("should block OvnEip deletion when used by NAT rules", func() {
+		f.SkipVersionPriorTo(1, 13, "This feature was introduced in v1.13")
+
+		ginkgo.By("Setting up test environment")
+		network, err := docker.NetworkInspect(dockerNetworkName)
+		framework.ExpectNoError(err)
+
+		exchangeLinkName := false
+		itFn(exchangeLinkName, providerNetworkName, linkMap, &providerBridgeIps)
+
+		ginkgo.By("Creating underlay vlan and subnet")
+		vlan := framework.MakeVlan(vlanName, providerNetworkName, 0)
+		_ = vlanClient.Create(vlan)
+
+		var cidrV4, gatewayV4 string
+		for _, config := range dockerNetwork.IPAM.Config {
+			if util.CheckProtocol(config.Subnet.String()) == kubeovnv1.ProtocolIPv4 && f.HasIPv4() {
+				cidrV4 = config.Subnet.String()
+				gatewayV4 = config.Gateway.String()
+				break
+			}
+		}
+		excludeIPs := make([]string, 0, len(network.Containers))
+		for _, container := range network.Containers {
+			if container.IPv4Address.IsValid() && f.HasIPv4() {
+				excludeIPs = append(excludeIPs, container.IPv4Address.Addr().String())
+			}
+		}
+		underlaySubnet := framework.MakeSubnet(underlaySubnetName, vlanName, cidrV4, gatewayV4, "", "", excludeIPs, nil, nil)
+		_ = subnetClient.CreateSync(underlaySubnet)
+
+		ginkgo.By("Step 1: Creating custom VPC and subnet for testing")
+		testVpcName := "test-vpc-dep-" + framework.RandomSuffix()
+		testSubnetName := "test-subnet-dep-" + framework.RandomSuffix()
+		testVpc := framework.MakeVpc(testVpcName, "", false, false, nil)
+		_ = vpcClient.CreateSync(testVpc)
+
+		testSubnet := framework.MakeSubnet(testSubnetName, "", "192.168.100.0/24", "192.168.100.1", testVpcName, util.OvnProvider, nil, nil, nil)
+		_ = subnetClient.CreateSync(testSubnet)
+
+		ginkgo.By("Step 2: Creating VIP for FIP")
+		vipName := "test-vip-dep-" + framework.RandomSuffix()
+		vip := makeOvnVip(namespaceName, vipName, testSubnetName, "", "", "")
+		vip = vipClient.CreateSync(vip)
+		framework.ExpectNotEmpty(vip.Status.V4ip)
+
+		ginkgo.By("Step 3: Creating OvnEip")
+		eipName := "test-eip-with-dep-" + framework.RandomSuffix()
+		eip := makeOvnEip(eipName, underlaySubnetName, "", "", "", util.OvnEipTypeNAT)
+		_ = ovnEipClient.CreateSync(eip)
+
+		eipCR := waitForOvnEipReady(ovnEipClient, eipName, 2*time.Minute)
+
+		ginkgo.By("Step 4: Creating OvnFip using the EIP")
+		fipName := "test-fip-dep-" + framework.RandomSuffix()
+		fip := makeOvnFip(fipName, eipName, "", "", testVpcName, vip.Status.V4ip)
+		_ = ovnFipClient.CreateSync(fip)
+
+		ginkgo.By("Step 5: Verifying EIP Status.Nat shows FIP usage")
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			eipCR = ovnEipClient.Get(eipName)
+			return eipCR != nil && strings.Contains(eipCR.Status.Nat, util.FipUsingEip), nil
+		}, "EIP Status.Nat should contain 'fip'")
+
+		ginkgo.By("Step 6: Attempting to delete EIP (should be blocked by FIP)")
+		err = f.KubeOVNClientSet.KubeovnV1().OvnEips().Delete(context.Background(), eipName, metav1.DeleteOptions{})
+		framework.ExpectNoError(err, "Delete operation should succeed")
+
+		ginkgo.By("Step 7: Verifying EIP still exists with finalizer (blocked)")
+		time.Sleep(5 * time.Second)
+		eipCR = ovnEipClient.Get(eipName)
+		framework.ExpectNotNil(eipCR, "EIP should still exist")
+		framework.ExpectNotNil(eipCR.DeletionTimestamp, "EIP should have DeletionTimestamp")
+		framework.ExpectContainElement(eipCR.Finalizers, util.KubeOVNControllerFinalizer,
+			"EIP should still have finalizer because FIP is using it")
+
+		ginkgo.By("Step 8: Deleting FIP to unblock EIP deletion")
+		ovnFipClient.DeleteSync(fipName)
+
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			_, err := f.KubeOVNClientSet.KubeovnV1().OvnFips().Get(context.Background(), fipName, metav1.GetOptions{})
+			return k8serrors.IsNotFound(err), nil
+		}, "FIP should be deleted")
+
+		ginkgo.By("Step 9: Verifying EIP is now deleted after FIP removal")
+		framework.WaitUntil(2*time.Second, time.Minute, func(_ context.Context) (bool, error) {
+			_, err := f.KubeOVNClientSet.KubeovnV1().OvnEips().Get(context.Background(), eipName, metav1.GetOptions{})
+			return k8serrors.IsNotFound(err), nil
+		}, "EIP should be deleted after FIP is removed")
+
+		ginkgo.By("Step 10: Cleaning up test resources")
+		vipClient.DeleteSync(vipName)
+		subnetClient.DeleteSync(testSubnetName)
+		vpcClient.DeleteSync(testVpcName)
+
+		framework.Logf("OvnEip dependency blocking test completed successfully")
+	})
 })
 
 func init() {
+	// Generate unique network names and subnets for this test run
+	// This avoids conflicts with other parallel test runs on the same host
+	suffix := framework.RandomSuffix()
+	dockerNetworkName = "kube-ovn-vlan0-" + suffix
+	dockerExtraNetworkName = "kube-ovn-extra-vlan0-" + suffix
+
+	// Generate random /24 subnets within 172.28.0.0/16
+	// This allows up to 256 parallel test runs on the same host
+	subnets := docker.GenerateRandomSubnets(2)
+	dockerNetworkSubnet = subnets[0]
+	dockerExtraNetworkSubnet = subnets[1]
+
 	klog.SetOutput(ginkgo.GinkgoWriter)
 
 	// Register flags.

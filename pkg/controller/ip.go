@@ -8,8 +8,8 @@ import (
 	"maps"
 	"net"
 	"reflect"
-	"slices"
 	"strings"
+	"time"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,12 +29,6 @@ func (c *Controller) enqueueAddIP(obj any) {
 	ipObj := obj.(*kubeovnv1.IP)
 	if strings.HasPrefix(ipObj.Name, util.U2OInterconnName[0:19]) {
 		return
-	}
-	klog.V(3).Infof("enqueue update status subnet %s", ipObj.Spec.Subnet)
-	c.updateSubnetStatusQueue.Add(ipObj.Spec.Subnet)
-	for _, as := range ipObj.Spec.AttachSubnets {
-		klog.V(3).Infof("enqueue update attach status for subnet %s", as)
-		c.updateSubnetStatusQueue.Add(as)
 	}
 
 	key := cache.MetaObjectToName(ipObj).String()
@@ -88,13 +82,6 @@ func (c *Controller) enqueueUpdateIP(oldObj, newObj any) {
 		c.updateIPQueue.Add(key)
 		return
 	}
-	if !slices.Equal(oldIP.Spec.AttachSubnets, newIP.Spec.AttachSubnets) {
-		klog.V(3).Infof("enqueue update status subnet %s", newIP.Spec.Subnet)
-		for _, as := range newIP.Spec.AttachSubnets {
-			klog.V(3).Infof("enqueue update status for attach subnet %s", as)
-			c.updateSubnetStatusQueue.Add(as)
-		}
-	}
 }
 
 func (c *Controller) enqueueDelIP(obj any) {
@@ -120,7 +107,7 @@ func (c *Controller) enqueueDelIP(obj any) {
 
 	key := cache.MetaObjectToName(ipObj).String()
 	klog.V(3).Infof("enqueue del ip %s", key)
-	c.delIPQueue.Add(ipObj)
+	c.delIPQueue.Add(ipObj.DeepCopy())
 }
 
 func (c *Controller) handleAddReservedIP(key string) error {
@@ -176,8 +163,8 @@ func (c *Controller) handleAddReservedIP(key string) error {
 		return err
 	}
 	if lsp != nil {
-		// port already exists means the ip already created
-		klog.V(3).Infof("ip %s is ready", portName)
+		// port already exists means the ip already created, finalizer already added above
+		klog.V(3).Infof("ip %s is ready, finalizer already added", portName)
 		return nil
 	}
 
@@ -220,6 +207,10 @@ func (c *Controller) handleAddReservedIP(key string) error {
 			return err
 		}
 	}
+
+	// Trigger subnet status update after all operations complete
+	// At this point: IPAM allocated, IP CR created with labels+finalizer
+	c.updateSubnetStatusQueue.Add(subnet.Name)
 	return nil
 }
 
@@ -232,6 +223,8 @@ func (c *Controller) handleUpdateIP(key string) error {
 		klog.Error(err)
 		return err
 	}
+
+	// Handle deletion first
 	if !cachedIP.DeletionTimestamp.IsZero() {
 		klog.Infof("handle deleting ip %s", cachedIP.Name)
 		subnet, err := c.subnetsLister.Get(cachedIP.Spec.Subnet)
@@ -272,18 +265,32 @@ func (c *Controller) handleUpdateIP(key string) error {
 			klog.Errorf("failed to handle del ip finalizer %v", err)
 			return err
 		}
-		c.updateSubnetStatusQueue.Add(cachedIP.Spec.Subnet)
+		return nil
 	}
+
+	// Non-deletion case: ensure finalizer is added
+	if err = c.handleAddOrUpdateIPFinalizer(cachedIP); err != nil {
+		klog.Errorf("failed to handle add or update finalizer for ip %s: %v", key, err)
+		return err
+	}
+
 	return nil
 }
 
 func (c *Controller) handleDelIP(ip *kubeovnv1.IP) error {
-	klog.Infof("deleting ip %s enqueue update status subnet %s", ip.Name, ip.Spec.Subnet)
-	c.updateSubnetStatusQueue.Add(ip.Spec.Subnet)
+	klog.Infof("deleting ip %s", ip.Name)
+
+	// For IP CRs deleted without finalizer (race condition or direct deletion),
+	// we need to ensure subnet status is updated.
+	// Note: IPAM release should have been done before this (either in handleUpdateIP
+	// or in pod controller), but we trigger subnet status update here as a safety net.
+	if ip.Spec.Subnet != "" {
+		c.updateSubnetStatusQueue.Add(ip.Spec.Subnet)
+	}
 	for _, as := range ip.Spec.AttachSubnets {
-		klog.V(3).Infof("enqueue update attach status for subnet %s", as)
 		c.updateSubnetStatusQueue.Add(as)
 	}
+
 	return nil
 }
 
@@ -296,6 +303,39 @@ func (c *Controller) syncIPFinalizer(cl client.Client) error {
 		}
 		return ips.Items[i].DeepCopy(), ips.Items[i].DeepCopy()
 	})
+}
+
+func (c *Controller) handleAddOrUpdateIPFinalizer(cachedIP *kubeovnv1.IP) error {
+	if !cachedIP.DeletionTimestamp.IsZero() {
+		// IP is being deleted, don't handle finalizer add/update
+		return nil
+	}
+
+	newIP := cachedIP.DeepCopy()
+	controllerutil.RemoveFinalizer(newIP, util.DepreciatedFinalizerName)
+	controllerutil.AddFinalizer(newIP, util.KubeOVNControllerFinalizer)
+	patch, err := util.GenerateMergePatchPayload(cachedIP, newIP)
+	if err != nil {
+		klog.Errorf("failed to generate patch payload for ip '%s', %v", cachedIP.Name, err)
+		return err
+	}
+	if _, err := c.config.KubeOvnClient.KubeovnV1().IPs().Patch(context.Background(), cachedIP.Name,
+		types.MergePatchType, patch, metav1.PatchOptions{}, ""); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		klog.Errorf("failed to add finalizer for ip '%s', %v", cachedIP.Name, err)
+		return err
+	}
+
+	// Trigger subnet status update after finalizer is processed as a fallback
+	// This handles cases where finalizer was not added during creation
+	// AddFinalizer is idempotent, so this is safe even if finalizer already exists
+	c.updateSubnetStatusQueue.Add(cachedIP.Spec.Subnet)
+	for _, as := range cachedIP.Spec.AttachSubnets {
+		c.updateSubnetStatusQueue.Add(as)
+	}
+	return nil
 }
 
 func (c *Controller) handleDelIPFinalizer(cachedIP *kubeovnv1.IP) error {
@@ -317,6 +357,15 @@ func (c *Controller) handleDelIPFinalizer(cachedIP *kubeovnv1.IP) error {
 		}
 		klog.Errorf("failed to remove finalizer from ip %s, %v", cachedIP.Name, err)
 		return err
+	}
+
+	// Trigger subnet status update after finalizer is removed
+	// This ensures subnet status reflects the IP release
+	// Add delay to ensure API server completes the finalizer removal
+	time.Sleep(300 * time.Millisecond)
+	c.updateSubnetStatusQueue.Add(cachedIP.Spec.Subnet)
+	for _, as := range cachedIP.Spec.AttachSubnets {
+		c.updateSubnetStatusQueue.Add(as)
 	}
 	return nil
 }
@@ -411,16 +460,17 @@ func (c *Controller) createOrUpdateIPCR(ipCRName, podName, ip, mac, subnetName, 
 	}
 	v4IP, v6IP := util.SplitStringIP(ip)
 	if ipCR == nil {
+		// Create CR with finalizer and labels all at once
 		ipCR = &kubeovnv1.IP{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: ipName,
+				Name:       ipName,
+				Finalizers: []string{util.KubeOVNControllerFinalizer},
 				Labels: map[string]string{
 					util.SubnetNameLabel: subnetName,
 					util.NodeNameLabel:   nodeName,
 					subnetName:           "",
 					util.IPReservedLabel: "false", // ip create with pod or node, ip not reserved
 				},
-				Finalizers: []string{util.KubeOVNControllerFinalizer},
 			},
 			Spec: kubeovnv1.IPSpec{
 				PodName:       key,
@@ -437,7 +487,7 @@ func (c *Controller) createOrUpdateIPCR(ipCRName, podName, ip, mac, subnetName, 
 				PodType:       podType,
 			},
 		}
-		if _, err = c.config.KubeOvnClient.KubeovnV1().IPs().Create(context.Background(), ipCR, metav1.CreateOptions{}); err != nil {
+		if ipCR, err = c.config.KubeOvnClient.KubeovnV1().IPs().Create(context.Background(), ipCR, metav1.CreateOptions{}); err != nil {
 			errMsg := fmt.Errorf("failed to create ip CR %s: %w", ipName, err)
 			klog.Error(errMsg)
 			return errMsg
@@ -469,13 +519,18 @@ func (c *Controller) createOrUpdateIPCR(ipCRName, podName, ip, mac, subnetName, 
 		if maps.Equal(newIPCR.Labels, ipCR.Labels) && reflect.DeepEqual(newIPCR.Spec, ipCR.Spec) {
 			return nil
 		}
-		controllerutil.AddFinalizer(newIPCR, util.KubeOVNControllerFinalizer)
 
 		if _, err = c.config.KubeOvnClient.KubeovnV1().IPs().Update(context.Background(), newIPCR, metav1.UpdateOptions{}); err != nil {
 			err := fmt.Errorf("failed to update ip CR %s: %w", ipCRName, err)
 			klog.Error(err)
 			return err
 		}
+	}
+	// Trigger subnet status update after CR creation with finalizer
+	time.Sleep(300 * time.Millisecond)
+	c.updateSubnetStatusQueue.Add(ipCR.Spec.Subnet)
+	for _, as := range ipCR.Spec.AttachSubnets {
+		c.updateSubnetStatusQueue.Add(as)
 	}
 	return nil
 }

@@ -97,7 +97,7 @@ func (c *Controller) enqueueDelVpc(obj any) {
 
 	if _, ok := vpc.Labels[util.VpcExternalLabel]; !vpc.Status.Default || !ok {
 		klog.V(3).Infof("enqueue delete vpc %s", vpc.Name)
-		c.delVpcQueue.Add(vpc)
+		c.delVpcQueue.Add(vpc.DeepCopy())
 	}
 }
 
@@ -129,14 +129,15 @@ func (c *Controller) handleDelVpc(vpc *kubeovnv1.Vpc) error {
 		return err
 	}
 
-	if err := c.handleDelVpcExternalSubnet(vpc.Name, c.config.ExternalGatewaySwitch); err != nil {
-		klog.Errorf("failed to delete external connection for vpc %s, error %v", vpc.Name, err)
+	// Delete connection to default external network
+	if err := c.deleteVpc2ExternalConnection(vpc.Name); err != nil {
+		klog.Errorf("failed to delete default external connection for vpc %s: %v", vpc.Name, err)
 		return err
 	}
 
 	for _, subnet := range vpc.Status.ExtraExternalSubnets {
 		klog.Infof("disconnect external network %s to vpc %s", subnet, vpc.Name)
-		if err := c.handleDelVpcExternalSubnet(vpc.Name, subnet); err != nil {
+		if err := c.handleDelVpcRes2ExternalSubnet(vpc.Name, subnet); err != nil {
 			klog.Error(err)
 			return err
 		}
@@ -349,20 +350,28 @@ func (c *Controller) handleAddOrUpdateVpc(key string) error {
 		return err
 	}
 
+	// Determine which external gateway switch to use
+	// Logic: default subnet exists -> use default; default not exists + ConfigMap specified -> use ConfigMap
+	externalGwSwitch, err := c.getConfigDefaultExternalSwitch()
+	if err != nil {
+		klog.Warningf("failed to get external gateway switch: %v", err)
+		externalGwSwitch = c.config.ExternalGatewaySwitch // fallback to default
+	}
+
 	var externalSubnet *kubeovnv1.Subnet
 	externalSubnetExist := false
 	externalSubnetGW := ""
 	if c.config.EnableEipSnat {
-		externalSubnet, err = c.subnetsLister.Get(c.config.ExternalGatewaySwitch)
+		externalSubnet, err = c.subnetsLister.Get(externalGwSwitch)
 		if err != nil {
-			klog.Warningf("enable-eip-snat need external subnet %s to be exist: %v", c.config.ExternalGatewaySwitch, err)
+			klog.Warningf("enable-eip-snat need external subnet %s to exist: %v", externalGwSwitch, err)
 		} else {
 			if !externalSubnet.Spec.LogicalGateway {
 				// logical gw external subnet can not access external
 				externalSubnetExist = true
 				externalSubnetGW = externalSubnet.Spec.Gateway
 			} else {
-				klog.Infof("default external subnet %s using logical gw", c.config.ExternalGatewaySwitch)
+				klog.Infof("external subnet %s using logical gw", externalGwSwitch)
 			}
 		}
 	}
@@ -416,7 +425,7 @@ func (c *Controller) handleAddOrUpdateVpc(key string) error {
 				nextHop := cm.Data["external-gw-addr"]
 				if nextHop == "" {
 					if !externalSubnetExist {
-						err = fmt.Errorf("failed to get external subnet %s", c.config.ExternalGatewaySwitch)
+						err = fmt.Errorf("failed to get external subnet %s", externalGwSwitch)
 						klog.Error(err)
 						return err
 					}
@@ -602,7 +611,7 @@ func (c *Controller) handleAddOrUpdateVpc(key string) error {
 	}
 
 	if vpc.Spec.EnableExternal || vpc.Status.EnableExternal {
-		if err = c.handleUpdateVpcExternal(cachedVpc, custVpcEnableExternalEcmp, externalSubnetExist, externalSubnetGW); err != nil {
+		if err = c.handleUpdateVpcExternal(cachedVpc, externalGwSwitch, custVpcEnableExternalEcmp, externalSubnetExist, externalSubnetGW); err != nil {
 			klog.Errorf("failed to handle update external subnet for vpc %s, %v", key, err)
 			return err
 		}
@@ -613,17 +622,25 @@ func (c *Controller) handleAddOrUpdateVpc(key string) error {
 		klog.Error(err)
 		return err
 	}
+
+	// Get the latest VPC object before updating status to avoid conflicts
+	latestVpc, err := c.config.KubeOvnClient.KubeovnV1().Vpcs().Get(context.Background(), key, metav1.GetOptions{})
+	if err != nil {
+		klog.Errorf("failed to get latest vpc %s: %v", key, err)
+		return err
+	}
+
 	if vpc.Spec.BFDPort == nil || !vpc.Spec.BFDPort.Enabled {
-		vpc.Status.BFDPort = kubeovnv1.BFDPortStatus{}
+		latestVpc.Status.BFDPort = kubeovnv1.BFDPortStatus{}
 	} else {
-		vpc.Status.BFDPort = kubeovnv1.BFDPortStatus{
+		latestVpc.Status.BFDPort = kubeovnv1.BFDPortStatus{
 			Name:  bfdPortName,
 			IP:    vpc.Spec.BFDPort.IP,
 			Nodes: bfdPortNodes,
 		}
 	}
 	if _, err = c.config.KubeOvnClient.KubeovnV1().Vpcs().
-		UpdateStatus(context.Background(), vpc, metav1.UpdateOptions{}); err != nil {
+		UpdateStatus(context.Background(), latestVpc, metav1.UpdateOptions{}); err != nil {
 		klog.Error(err)
 		return err
 	}
@@ -631,7 +648,7 @@ func (c *Controller) handleAddOrUpdateVpc(key string) error {
 	return nil
 }
 
-func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableExternalEcmp, defaultExternalSubnetExist bool, externalSubnetGW string) error {
+func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, externalGwSwitch string, custVpcEnableExternalEcmp, defaultExternalSubnetExist bool, externalSubnetGW string) error {
 	if c.config.EnableEipSnat && vpc.Name == util.DefaultVpc {
 		klog.Infof("external_gw handle ovn default external gw %s", vpc.Name)
 		return nil
@@ -652,14 +669,14 @@ func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableEx
 
 	if !vpc.Spec.EnableExternal && vpc.Status.EnableExternal {
 		// just del all external subnets connection
-		klog.Infof("disconnect default external subnet %s to vpc %s", c.config.ExternalGatewaySwitch, vpc.Name)
-		if err := c.handleDelVpcExternalSubnet(vpc.Name, c.config.ExternalGatewaySwitch); err != nil {
-			klog.Errorf("failed to delete external subnet %s connection for vpc %s, error %v", c.config.ExternalGatewaySwitch, vpc.Name, err)
+		klog.Infof("disconnect default external subnet %s to vpc %s", externalGwSwitch, vpc.Name)
+		if err := c.handleDelVpcRes2ExternalSubnet(vpc.Name, externalGwSwitch); err != nil {
+			klog.Errorf("failed to delete external subnet %s connection for vpc %s, error %v", externalGwSwitch, vpc.Name, err)
 			return err
 		}
 		for _, subnet := range vpc.Status.ExtraExternalSubnets {
 			klog.Infof("disconnect external subnet %s to vpc %s", subnet, vpc.Name)
-			if err := c.handleDelVpcExternalSubnet(vpc.Name, subnet); err != nil {
+			if err := c.handleDelVpcRes2ExternalSubnet(vpc.Name, subnet); err != nil {
 				klog.Errorf("failed to delete external subnet %s connection for vpc %s, error %v", subnet, vpc.Name, err)
 				return err
 			}
@@ -671,9 +688,9 @@ func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableEx
 			// just add external connection
 			if vpc.Spec.ExtraExternalSubnets == nil && defaultExternalSubnetExist {
 				// only connect default external subnet
-				klog.Infof("connect default external subnet %s with vpc %s", c.config.ExternalGatewaySwitch, vpc.Name)
-				if err := c.handleAddVpcExternalSubnet(vpc.Name, c.config.ExternalGatewaySwitch); err != nil {
-					klog.Errorf("failed to add external subnet %s connection for vpc %s, error %v", c.config.ExternalGatewaySwitch, vpc.Name, err)
+				klog.Infof("connect default external subnet %s with vpc %s", externalGwSwitch, vpc.Name)
+				if err := c.handleAddVpcExternalSubnet(vpc.Name, externalGwSwitch); err != nil {
+					klog.Errorf("failed to add external subnet %s connection for vpc %s, error %v", externalGwSwitch, vpc.Name, err)
 					return err
 				}
 			}
@@ -703,7 +720,7 @@ func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableEx
 		for _, subnet := range vpc.Status.ExtraExternalSubnets {
 			if !slices.Contains(vpc.Spec.ExtraExternalSubnets, subnet) {
 				klog.Infof("disconnect external subnet %s to vpc %s", subnet, vpc.Name)
-				if err := c.handleDelVpcExternalSubnet(vpc.Name, subnet); err != nil {
+				if err := c.handleDelVpcRes2ExternalSubnet(vpc.Name, subnet); err != nil {
 					klog.Errorf("failed to delete external subnet %s connection for vpc %s, error %v", subnet, vpc.Name, err)
 					return err
 				}
@@ -716,7 +733,7 @@ func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableEx
 		// create bfd between lrp and physical switch gw
 		// bfd status down means current lrp binding chassis node external nic lost external network connectivity
 		// should switch lrp to another node
-		lrpEipName := fmt.Sprintf("%s-%s", vpc.Name, c.config.ExternalGatewaySwitch)
+		lrpEipName := fmt.Sprintf("%s-%s", vpc.Name, externalGwSwitch)
 		v4ExtGw, _ := util.SplitStringIP(externalSubnetGW)
 		// TODO: dualstack
 		if _, err := c.OVNNbClient.CreateBFD(lrpEipName, v4ExtGw, c.config.BfdMinRx, c.config.BfdMinTx, c.config.BfdDetectMult, nil); err != nil {
@@ -735,7 +752,7 @@ func (c *Controller) handleUpdateVpcExternal(vpc *kubeovnv1.Vpc, custVpcEnableEx
 	}
 
 	if !vpc.Spec.EnableBfd && vpc.Status.EnableBfd {
-		lrpEipName := fmt.Sprintf("%s-%s", vpc.Name, c.config.ExternalGatewaySwitch)
+		lrpEipName := fmt.Sprintf("%s-%s", vpc.Name, externalGwSwitch)
 		if err := c.OVNNbClient.DeleteBFDByDstIP(lrpEipName, ""); err != nil {
 			klog.Error(err)
 			return err
@@ -1182,11 +1199,13 @@ func (c *Controller) formatVpc(vpc *kubeovnv1.Vpc) (*kubeovnv1.Vpc, error) {
 	}
 
 	if vpc.DeletionTimestamp.IsZero() && !slices.Contains(vpc.GetFinalizers(), util.KubeOVNControllerFinalizer) {
+		controllerutil.RemoveFinalizer(vpc, util.DepreciatedFinalizerName)
 		controllerutil.AddFinalizer(vpc, util.KubeOVNControllerFinalizer)
 		changed = true
 	}
 
 	if !vpc.DeletionTimestamp.IsZero() && len(vpc.Status.Subnets) == 0 {
+		controllerutil.RemoveFinalizer(vpc, util.DepreciatedFinalizerName)
 		controllerutil.RemoveFinalizer(vpc, util.KubeOVNControllerFinalizer)
 		changed = true
 	}
@@ -1425,7 +1444,7 @@ func (c *Controller) handleDeleteVpcStaticRoute(key string) error {
 	return nil
 }
 
-func (c *Controller) handleDelVpcExternalSubnet(key, subnet string) error {
+func (c *Controller) handleDelVpcRes2ExternalSubnet(key, subnet string) error {
 	lspName := fmt.Sprintf("%s-%s", subnet, key)
 	lrpName := fmt.Sprintf("%s-%s", key, subnet)
 	klog.Infof("delete vpc lrp %s", lrpName)
@@ -1511,4 +1530,31 @@ func (c *Controller) updateVpcExternalStatus(key string, enableExternal bool) er
 	}
 
 	return nil
+}
+
+// deleteVpc2ExternalConnection deletes VPC connections to external networks
+// Deletes both ConfigMap-specified and default connections to ensure complete cleanup
+// even if configuration changed during VPC lifecycle
+func (c *Controller) deleteVpc2ExternalConnection(vpcName string) error {
+	var anyErr error
+
+	// Try to delete ConfigMap-specified connection if exists
+	cm, err := c.configMapsLister.ConfigMaps(c.config.ExternalGatewayConfigNS).Get(util.ExternalGatewayConfig)
+	if err == nil && cm.Data["external-gw-switch"] != "" {
+		configSwitch := cm.Data["external-gw-switch"]
+		if err := c.handleDelVpcRes2ExternalSubnet(vpcName, configSwitch); err != nil {
+			klog.Errorf("failed to delete ConfigMap-specified connection %s for vpc %s: %v", configSwitch, vpcName, err)
+			anyErr = err
+		}
+	}
+
+	// Always try to delete default connection
+	if err := c.handleDelVpcRes2ExternalSubnet(vpcName, c.config.ExternalGatewaySwitch); err != nil {
+		klog.Errorf("failed to delete default connection %s for vpc %s: %v", c.config.ExternalGatewaySwitch, vpcName, err)
+		if anyErr == nil {
+			anyErr = err
+		}
+	}
+
+	return anyErr
 }

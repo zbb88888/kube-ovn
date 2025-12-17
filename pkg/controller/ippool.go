@@ -44,7 +44,7 @@ func (c *Controller) enqueueDeleteIPPool(obj any) {
 	}
 
 	klog.V(3).Infof("enqueue delete ippool %s", cache.MetaObjectToName(ippool).String())
-	c.deleteIPPoolQueue.Add(ippool)
+	c.deleteIPPoolQueue.Add(ippool.DeepCopy())
 }
 
 func (c *Controller) enqueueUpdateIPPool(oldObj, newObj any) {
@@ -215,6 +215,7 @@ func (c *Controller) handleAddIPPoolFinalizer(ippool *kubeovnv1.IPPool) error {
 	}
 
 	newIPPool := ippool.DeepCopy()
+	controllerutil.RemoveFinalizer(newIPPool, util.DepreciatedFinalizerName)
 	controllerutil.AddFinalizer(newIPPool, util.KubeOVNControllerFinalizer)
 	patch, err := util.GenerateMergePatchPayload(ippool, newIPPool)
 	if err != nil {
