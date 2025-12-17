@@ -30,15 +30,19 @@ type VpcNatGateway struct {
 }
 
 type VpcNatGatewaySpec struct {
-	Vpc             string              `json:"vpc"`
-	Subnet          string              `json:"subnet"`
-	ExternalSubnets []string            `json:"externalSubnets"`
-	LanIP           string              `json:"lanIp"`
-	Selector        []string            `json:"selector"`
-	Tolerations     []corev1.Toleration `json:"tolerations"`
-	Affinity        corev1.Affinity     `json:"affinity"`
-	QoSPolicy       string              `json:"qosPolicy"`
-	BgpSpeaker      VpcBgpSpeaker       `json:"bgpSpeaker"`
+	Vpc             string   `json:"vpc"`
+	Subnet          string   `json:"subnet"`
+	ExternalSubnets []string `json:"externalSubnets"`
+
+	EnableDefaultSnat bool `json:"enableDefaultSnat,omitempty"`
+
+	DefaultSnatSubnet string              `json:"defaultSnatSubnet,omitempty"`
+	LanIP             string              `json:"lanIp"`
+	Selector          []string            `json:"selector"`
+	Tolerations       []corev1.Toleration `json:"tolerations"`
+	Affinity          corev1.Affinity     `json:"affinity"`
+	QoSPolicy         string              `json:"qosPolicy"`
+	BgpSpeaker        VpcBgpSpeaker       `json:"bgpSpeaker"`
 }
 
 type VpcBgpSpeaker struct {

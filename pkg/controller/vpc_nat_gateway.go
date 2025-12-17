@@ -750,7 +750,12 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 	}
 
 	externalNadNamespace, externalNadName := c.getExternalSubnetNad(gw)
-	podAnnotations := util.GenNatGwPodAnnotations(gw, externalNadNamespace, externalNadName)
+	defaultSnatNadNamespace, defaultSnatNadName, err := c.getDefaultSnatSubnetNad(gw)
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+	podAnnotations := util.GenNatGwPodAnnotations(gw, externalNadNamespace, externalNadName, defaultSnatNadNamespace, defaultSnatNadName)
 
 	// Restart logic to fix #5072
 	if oldSts != nil && len(oldSts.Spec.Template.Annotations) != 0 {
@@ -819,7 +824,7 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 		return nil, err
 	}
 
-	// Set the default routes to the external network
+	// Set the default routes to the external network nic net1
 	subnet, err := c.subnetsLister.Get(util.GetNatGwExternalNetwork(gw.Spec.ExternalSubnets))
 	if err != nil {
 		klog.Error(err)
@@ -837,6 +842,29 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 	if err = setPodRoutesAnnotation(annotations, subnet.Spec.Provider, routes); err != nil {
 		klog.Error(err)
 		return nil, err
+	}
+
+	// Set the fallback default routes to the default VPC subnet (net2) with lower priority
+	// This allows traffic to use OVN nat-outgoing when no public EIP is available on net1
+	if gw.Spec.EnableDefaultSnat && gw.Spec.DefaultSnatSubnet != "" {
+		defaultSnatSubnet, err := c.subnetsLister.Get(gw.Spec.DefaultSnatSubnet)
+		if err != nil {
+			klog.Errorf("failed to get default SNAT subnet %s: %v", gw.Spec.DefaultSnatSubnet, err)
+			return nil, err
+		}
+
+		routes = routes[0:0]
+		v4Gateway, v6Gateway = util.SplitStringIP(defaultSnatSubnet.Spec.Gateway)
+		if v4Gateway != "" {
+			routes = append(routes, request.Route{Destination: "0.0.0.0/0", Gateway: v4Gateway, Metric: util.VpcNatGwFallbackRouteMetric})
+		}
+		if v6Gateway != "" {
+			routes = append(routes, request.Route{Destination: "::/0", Gateway: v6Gateway, Metric: util.VpcNatGwFallbackRouteMetric})
+		}
+		if err = setPodRoutesAnnotation(annotations, defaultSnatSubnet.Spec.Provider, routes); err != nil {
+			klog.Error(err)
+			return nil, err
+		}
 	}
 
 	selectors := util.GenNatGwSelectors(gw.Spec.Selector)
@@ -866,6 +894,12 @@ func (c *Controller) genNatGwStatefulSet(gw *kubeovnv1.VpcNatGateway, oldSts *v1
 							Name:    "vpc-nat-gw",
 							Image:   vpcNatImage,
 							Command: []string{"sleep", "infinity"},
+							Env: []corev1.EnvVar{
+								{
+									Name:  "ENABLE_DEFAULT_SNAT",
+									Value: fmt.Sprintf("%t", gw.Spec.EnableDefaultSnat),
+								},
+							},
 							Lifecycle: &corev1.Lifecycle{
 								PostStart: &corev1.LifecycleHandler{
 									Exec: &corev1.ExecAction{
@@ -924,6 +958,29 @@ func (c *Controller) getExternalSubnetNad(gw *kubeovnv1.VpcNatGateway) (string, 
 	}
 
 	return externalNadNamespace, externalNadName
+}
+
+// getDefaultSnatSubnetNad returns the namespace and name of the NetworkAttachmentDefinition associated with
+// the default SNAT subnet for fallback SNAT via OVN nat-outgoing
+func (c *Controller) getDefaultSnatSubnetNad(gw *kubeovnv1.VpcNatGateway) (string, string, error) {
+	if !gw.Spec.EnableDefaultSnat || gw.Spec.DefaultSnatSubnet == "" {
+		return "", "", nil
+	}
+
+	defaultSnatSubnet, err := c.subnetsLister.Get(gw.Spec.DefaultSnatSubnet)
+	if err != nil {
+		klog.Errorf("failed to get default SNAT subnet %s: %v", gw.Spec.DefaultSnatSubnet, err)
+		return "", "", err
+	}
+
+	name, namespace, ok := util.GetNadBySubnetProvider(defaultSnatSubnet.Spec.Provider)
+	if !ok {
+		err = fmt.Errorf("failed to get NAD info from subnet provider %s for default SNAT subnet %s", defaultSnatSubnet.Spec.Provider, gw.Spec.DefaultSnatSubnet)
+		klog.Error(err)
+		return "", "", err
+	}
+
+	return namespace, name, nil
 }
 
 func (c *Controller) cleanUpVpcNatGw() error {
