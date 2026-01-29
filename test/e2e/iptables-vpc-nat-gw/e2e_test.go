@@ -178,7 +178,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom vpc " + vpcName)
 	vpc := framework.MakeVpc(vpcName, lanIP, false, false, nil)
 	_ = vpcClient.CreateSync(vpc)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom vpc " + vpcName)
 		vpcClient.DeleteSync(vpcName)
 	})
@@ -186,7 +186,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom overlay subnet " + overlaySubnetName)
 	overlaySubnet := framework.MakeSubnet(overlaySubnetName, "", overlaySubnetV4Cidr, overlaySubnetV4Gw, vpcName, "", nil, nil, nil)
 	_ = subnetClient.CreateSync(overlaySubnet)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom overlay subnet " + overlaySubnetName)
 		subnetClient.DeleteSync(overlaySubnetName)
 	})
@@ -194,7 +194,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom vpc nat gw " + vpcNatGwName)
 	vpcNatGw := framework.MakeVpcNatGateway(vpcNatGwName, vpcName, overlaySubnetName, lanIP, externalNetworkName, natGwQosPolicy)
 	_ = vpcNatGwClient.CreateSync(vpcNatGw, f.ClientSet)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom vpc nat gw " + vpcNatGwName)
 		vpcNatGwClient.DeleteSync(vpcNatGwName)
 	})
@@ -381,7 +381,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 			subnetClient, networkAttachDefName, net1NicName,
 			externalSubnetProvider, dockerExtNet1Name)
 
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Waiting for all EIPs using subnet " + networkAttachDefName + " to be deleted")
 			gomega.Eventually(func() int {
 				eips, err := f.KubeOVNClientSet.KubeovnV1().IptablesEIPs().List(context.Background(), metav1.ListOptions{
@@ -491,7 +491,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables vip for fip")
 		fipVip := framework.MakeVip(f.Namespace.Name, fipVipName, overlaySubnetName, "", "", "")
 		_ = vipClient.CreateSync(fipVip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up fip vip " + fipVipName)
 			vipClient.DeleteSync(fipVipName)
 		})
@@ -499,7 +499,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables eip for fip")
 		fipEip := framework.MakeIptablesEIP(fipEipName, "", "", "", vpcNatGwName, "", "")
 		_ = iptablesEIPClient.CreateSync(fipEip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up fip eip " + fipEipName)
 			iptablesEIPClient.DeleteSync(fipEipName)
 		})
@@ -507,7 +507,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables fip")
 		fip := framework.MakeIptablesFIPRule(fipName, fipEipName, fipVip.Status.V4ip)
 		_ = iptablesFIPClient.CreateSync(fip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up fip " + fipName)
 			iptablesFIPClient.DeleteSync(fipName)
 		})
@@ -515,7 +515,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables eip for snat")
 		snatEip := framework.MakeIptablesEIP(snatEipName, "", "", "", vpcNatGwName, "", "")
 		_ = iptablesEIPClient.CreateSync(snatEip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up snat eip " + snatEipName)
 			iptablesEIPClient.DeleteSync(snatEipName)
 		})
@@ -523,7 +523,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables snat")
 		snat := framework.MakeIptablesSnatRule(snatName, snatEipName, overlaySubnetV4Cidr)
 		_ = iptablesSnatRuleClient.CreateSync(snat)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up snat " + snatName)
 			iptablesSnatRuleClient.DeleteSync(snatName)
 		})
@@ -531,7 +531,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables vip for dnat")
 		dnatVip := framework.MakeVip(f.Namespace.Name, dnatVipName, overlaySubnetName, "", "", "")
 		_ = vipClient.CreateSync(dnatVip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up dnat vip " + dnatVipName)
 			vipClient.DeleteSync(dnatVipName)
 		})
@@ -540,7 +540,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables eip for dnat")
 		dnatEip := framework.MakeIptablesEIP(dnatEipName, "", "", "", vpcNatGwName, "", "")
 		_ = iptablesEIPClient.CreateSync(dnatEip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up dnat eip " + dnatEipName)
 			iptablesEIPClient.DeleteSync(dnatEipName)
 		})
@@ -548,7 +548,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables dnat")
 		dnat := framework.MakeIptablesDnatRule(dnatName, dnatEipName, "80", "tcp", dnatVip.Status.V4ip, "8080")
 		_ = iptablesDnatRuleClient.CreateSync(dnat)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up dnat " + dnatName)
 			iptablesDnatRuleClient.DeleteSync(dnatName)
 		})
@@ -557,7 +557,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating share vip")
 		shareVip := framework.MakeVip(f.Namespace.Name, sharedVipName, overlaySubnetName, "", "", "")
 		_ = vipClient.CreateSync(shareVip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared vip " + sharedVipName)
 			vipClient.DeleteSync(sharedVipName)
 		})
@@ -566,7 +566,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating share iptables eip")
 		shareEip := framework.MakeIptablesEIP(sharedEipName, "", "", "", vpcNatGwName, "", "")
 		_ = iptablesEIPClient.CreateSync(shareEip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared eip " + sharedEipName)
 			iptablesEIPClient.DeleteSync(sharedEipName)
 		})
@@ -574,7 +574,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating the first iptables fip with share eip vip should be ok")
 		shareFipShouldOk := framework.MakeIptablesFIPRule(sharedEipFipShouldOkName, sharedEipName, fipVip.Status.V4ip)
 		_ = iptablesFIPClient.CreateSync(shareFipShouldOk)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared fip (should ok) " + sharedEipFipShouldOkName)
 			iptablesFIPClient.DeleteSync(sharedEipFipShouldOkName)
 		})
@@ -582,7 +582,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating the second iptables fip with share eip vip should be failed")
 		shareFipShouldFail := framework.MakeIptablesFIPRule(sharedEipFipShouldFailName, sharedEipName, fipVip.Status.V4ip)
 		_ = iptablesFIPClient.Create(shareFipShouldFail)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared fip (should fail) " + sharedEipFipShouldFailName)
 			iptablesFIPClient.DeleteSync(sharedEipFipShouldFailName)
 		})
@@ -590,7 +590,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables dnat for dnat with share eip vip")
 		shareDnat := framework.MakeIptablesDnatRule(sharedEipDnatName, sharedEipName, "80", "tcp", fipVip.Status.V4ip, "8080")
 		_ = iptablesDnatRuleClient.CreateSync(shareDnat)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared dnat " + sharedEipDnatName)
 			iptablesDnatRuleClient.DeleteSync(sharedEipDnatName)
 		})
@@ -598,7 +598,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("Creating iptables snat with share eip vip")
 		shareSnat := framework.MakeIptablesSnatRule(sharedEipSnatName, sharedEipName, overlaySubnetV4Cidr)
 		_ = iptablesSnatRuleClient.CreateSync(shareSnat)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared snat " + sharedEipSnatName)
 			iptablesSnatRuleClient.DeleteSync(sharedEipSnatName)
 		})
@@ -855,7 +855,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		vipName := "test-vip-" + framework.RandomSuffix()
 		vip := framework.MakeVip(f.Namespace.Name, vipName, overlaySubnetName, "", "", "")
 		_ = vipClient.CreateSync(vip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up vip " + vipName)
 			vipClient.DeleteSync(vipName)
 		})
@@ -956,7 +956,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		nad, err := attachNetClient.NetworkAttachmentDefinitionInterface.Get(context.TODO(), networkAttachDefName, metav1.GetOptions{})
 		framework.ExpectNoError(err, "getting network attachment definition "+networkAttachDefName)
 		originalNadConfig := nad.Spec.Config
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Restoring shared NAD " + networkAttachDefName + " to original configuration")
 			nadToRestore, err := attachNetClient.NetworkAttachmentDefinitionInterface.Get(context.TODO(), networkAttachDefName, metav1.GetOptions{})
 			if err != nil {
@@ -999,7 +999,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("2. Creating custom vpc " + vpcName)
 		vpc := framework.MakeVpc(vpcName, lanIP, false, false, nil)
 		_ = vpcClient.CreateSync(vpc)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up custom vpc " + vpcName)
 			vpcClient.DeleteSync(vpcName)
 		})
@@ -1007,7 +1007,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("3. Creating custom overlay subnet " + overlaySubnetName)
 		overlaySubnet := framework.MakeSubnet(overlaySubnetName, "", overlaySubnetV4Cidr, overlaySubnetV4Gw, vpcName, "", nil, nil, nil)
 		_ = subnetClient.CreateSync(overlaySubnet)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up custom overlay subnet " + overlaySubnetName)
 			subnetClient.DeleteSync(overlaySubnetName)
 		})
@@ -1015,7 +1015,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		ginkgo.By("4. Creating custom vpc nat gw with noDefaultEIP=true " + vpcNatGwName)
 		vpcNatGw := framework.MakeVpcNatGatewayWithNoDefaultEIP(vpcNatGwName, vpcName, overlaySubnetName, lanIP, networkAttachDefName, natgwQoS, true)
 		_ = vpcNatGwClient.CreateSync(vpcNatGw, f.ClientSet)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up custom vpc nat gw " + vpcNatGwName)
 			vpcNatGwClient.DeleteSync(vpcNatGwName)
 		})
@@ -1042,7 +1042,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		eipName := "manual-eip-" + framework.RandomSuffix()
 		eip := framework.MakeIptablesEIP(eipName, "", "", "", vpcNatGwName, networkAttachDefName, "")
 		_ = iptablesEIPClient.CreateSync(eip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up manual eip " + eipName)
 			iptablesEIPClient.DeleteSync(eipName)
 		})
@@ -1056,7 +1056,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		vipName := "test-vip-no-ipam-" + framework.RandomSuffix()
 		vip := framework.MakeVip(f.Namespace.Name, vipName, overlaySubnetName, "", "", "")
 		_ = vipClient.CreateSync(vip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up vip " + vipName)
 			vipClient.DeleteSync(vipName)
 		})
@@ -1065,7 +1065,7 @@ var _ = framework.OrderedDescribe("[group:iptables-vpc-nat-gw]", func() {
 		fipName := "test-fip-no-ipam-" + framework.RandomSuffix()
 		fip := framework.MakeIptablesFIPRule(fipName, eipName, vip.Status.V4ip)
 		_ = iptablesFIPClient.CreateSync(fip)
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up fip " + fipName)
 			iptablesFIPClient.DeleteSync(fipName)
 		})

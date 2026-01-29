@@ -194,7 +194,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom vpc " + vpcName)
 	vpc := framework.MakeVpc(vpcName, lanIP, false, false, nil)
 	_ = vpcClient.CreateSync(vpc)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom vpc " + vpcName)
 		vpcClient.DeleteSync(vpcName)
 	})
@@ -202,7 +202,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom overlay subnet " + overlaySubnetName)
 	overlaySubnet := framework.MakeSubnet(overlaySubnetName, "", overlaySubnetV4Cidr, overlaySubnetV4Gw, vpcName, "", nil, nil, nil)
 	_ = subnetClient.CreateSync(overlaySubnet)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom overlay subnet " + overlaySubnetName)
 		subnetClient.DeleteSync(overlaySubnetName)
 	})
@@ -210,7 +210,7 @@ func setupVpcNatGwTestEnvironment(
 	ginkgo.By("Creating custom vpc nat gw " + vpcNatGwName)
 	vpcNatGw := framework.MakeVpcNatGateway(vpcNatGwName, vpcName, overlaySubnetName, lanIP, externalNetworkName, natGwQosPolicy)
 	_ = vpcNatGwClient.CreateSync(vpcNatGw, f.ClientSet)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up custom vpc nat gw " + vpcNatGwName)
 		vpcNatGwClient.DeleteSync(vpcNatGwName)
 	})
@@ -374,7 +374,7 @@ func defaultQoSCases(f *framework.Framework,
 
 	qosPolicy := framework.MakeQoSPolicy(qosPolicyName, true, apiv1.QoSBindingTypeNatGw, rules)
 	_ = qosPolicyClient.CreateSync(qosPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up qos policy " + qosPolicyName)
 		qosPolicyClient.DeleteSync(qosPolicyName)
 	})
@@ -425,7 +425,7 @@ func eipQoSCases(f *framework.Framework,
 
 	qosPolicy := framework.MakeQoSPolicy(qosPolicyName, false, apiv1.QoSBindingTypeEIP, rules)
 	qosPolicy = qosPolicyClient.CreateSync(qosPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up qos policy " + qosPolicyName)
 		qosPolicyClient.DeleteSync(qosPolicyName)
 	})
@@ -463,7 +463,7 @@ func eipQoSCases(f *framework.Framework,
 	newRules := getEIPQoSRule(newEIPLimit)
 	newQoSPolicy := framework.MakeQoSPolicy(newQoSPolicyName, false, apiv1.QoSBindingTypeEIP, newRules)
 	_ = qosPolicyClient.CreateSync(newQoSPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up new qos policy " + newQoSPolicyName)
 		qosPolicyClient.DeleteSync(newQoSPolicyName)
 	})
@@ -502,7 +502,7 @@ func specifyingIPQoSCases(f *framework.Framework,
 
 	qosPolicy := framework.MakeQoSPolicy(qosPolicyName, true, apiv1.QoSBindingTypeNatGw, rules)
 	_ = qosPolicyClient.CreateSync(qosPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up qos policy " + qosPolicyName)
 		qosPolicyClient.DeleteSync(qosPolicyName)
 	})
@@ -543,7 +543,7 @@ func priorityQoSCases(f *framework.Framework,
 
 	natgwQoSPolicy := framework.MakeQoSPolicy(natGwQoSPolicyName, true, apiv1.QoSBindingTypeNatGw, natgwRules)
 	_ = qosPolicyClient.CreateSync(natgwQoSPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up natgw qos policy " + natGwQoSPolicyName)
 		qosPolicyClient.DeleteSync(natGwQoSPolicyName)
 	})
@@ -557,7 +557,7 @@ func priorityQoSCases(f *framework.Framework,
 
 	eipQoSPolicy := framework.MakeQoSPolicy(eipQoSPolicyName, false, apiv1.QoSBindingTypeEIP, eipRules)
 	_ = qosPolicyClient.CreateSync(eipQoSPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up eip qos policy " + eipQoSPolicyName)
 		qosPolicyClient.DeleteSync(eipQoSPolicyName)
 	})
@@ -583,7 +583,7 @@ func priorityQoSCases(f *framework.Framework,
 
 	newNatgwQoSPolicy := framework.MakeQoSPolicy(newNatGwQoSPolicyName, true, apiv1.QoSBindingTypeNatGw, newNatgwRules)
 	_ = qosPolicyClient.CreateSync(newNatgwQoSPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up new natgw qos policy " + newNatGwQoSPolicyName)
 		qosPolicyClient.DeleteSync(newNatGwQoSPolicyName)
 	})
@@ -648,7 +648,7 @@ func createNatGwAndSetQosCases(f *framework.Framework,
 
 	qosPolicy := framework.MakeQoSPolicy(natgwQoSPolicyName, true, apiv1.QoSBindingTypeNatGw, rules)
 	_ = qosPolicyClient.CreateSync(qosPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up recreated qos policy " + natgwQoSPolicyName)
 		qosPolicyClient.DeleteSync(natgwQoSPolicyName)
 	})
@@ -656,7 +656,7 @@ func createNatGwAndSetQosCases(f *framework.Framework,
 	ginkgo.By("Creating custom vpc nat gw")
 	vpcNatGw := framework.MakeVpcNatGateway(natgwName, vpcName, overlaySubnetName, lanIP, attachDefName, natgwQoSPolicyName)
 	_ = vpcNatGwClient.CreateSync(vpcNatGw, f.ClientSet)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up recreated vpc nat gw " + natgwName)
 		vpcNatGwClient.DeleteSync(natgwName)
 	})
@@ -667,7 +667,7 @@ func createNatGwAndSetQosCases(f *framework.Framework,
 
 	eipQoSPolicy := framework.MakeQoSPolicy(eipQoSPolicyName, false, apiv1.QoSBindingTypeEIP, rules)
 	_ = qosPolicyClient.CreateSync(eipQoSPolicy)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up recreated qos policy " + eipQoSPolicyName)
 		qosPolicyClient.DeleteSync(eipQoSPolicyName)
 	})
@@ -676,7 +676,7 @@ func createNatGwAndSetQosCases(f *framework.Framework,
 	vpc1EIP := framework.MakeIptablesEIP(eipName, "", "", "", natgwName, attachDefName, eipQoSPolicyName)
 	_ = eipClient.CreateSync(vpc1EIP)
 	vpc1EIP = waitForIptablesEIPReady(eipClient, eipName, 60*time.Second)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up recreated eip " + eipName)
 		eipClient.DeleteSync(eipName)
 	})
@@ -684,7 +684,7 @@ func createNatGwAndSetQosCases(f *framework.Framework,
 	ginkgo.By("Creating fip " + fipName)
 	fip := framework.MakeIptablesFIPRule(fipName, eipName, vpc1Pod.Status.PodIP)
 	_ = fipClient.CreateSync(fip)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up recreated fip " + fipName)
 		fipClient.DeleteSync(fipName)
 	})
@@ -779,7 +779,7 @@ func setupQosTestResources(
 	ginkgo.By("Creating pod " + vpcQosParams.vpc1PodName)
 	pod1 := framework.MakePod(f.Namespace.Name, vpcQosParams.vpc1PodName, nil, annotations1, framework.AgnhostImage, iperfServerCmd, nil)
 	pod1 = podClient.CreateSync(pod1)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up pod " + vpcQosParams.vpc1PodName)
 		podClient.DeleteSync(vpcQosParams.vpc1PodName)
 	})
@@ -789,7 +789,7 @@ func setupQosTestResources(
 	eip1 := framework.MakeIptablesEIP(vpcQosParams.vpc1EIPName, "", "", "", vpcQosParams.vpcNat1GwName, vpcQosParams.attachDefName, "")
 	_ = iptablesEIPClient.CreateSync(eip1)
 	eip1 = waitForIptablesEIPReady(iptablesEIPClient, vpcQosParams.vpc1EIPName, 60*time.Second)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up eip " + vpcQosParams.vpc1EIPName)
 		iptablesEIPClient.DeleteSync(vpcQosParams.vpc1EIPName)
 	})
@@ -798,7 +798,7 @@ func setupQosTestResources(
 	ginkgo.By("Creating fip " + vpcQosParams.vpc1FIPName)
 	fip1 := framework.MakeIptablesFIPRule(vpcQosParams.vpc1FIPName, vpcQosParams.vpc1EIPName, pod1.Status.PodIP)
 	_ = iptablesFIPClient.CreateSync(fip1)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up fip " + vpcQosParams.vpc1FIPName)
 		iptablesFIPClient.DeleteSync(vpcQosParams.vpc1FIPName)
 	})
@@ -810,7 +810,7 @@ func setupQosTestResources(
 	ginkgo.By("Creating pod " + vpcQosParams.vpc2PodName)
 	pod2 := framework.MakePod(f.Namespace.Name, vpcQosParams.vpc2PodName, nil, annotations2, framework.AgnhostImage, iperfServerCmd, nil)
 	pod2 = podClient.CreateSync(pod2)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up pod " + vpcQosParams.vpc2PodName)
 		podClient.DeleteSync(vpcQosParams.vpc2PodName)
 	})
@@ -820,7 +820,7 @@ func setupQosTestResources(
 	eip2 := framework.MakeIptablesEIP(vpcQosParams.vpc2EIPName, "", "", "", vpcQosParams.vpcNat2GwName, vpcQosParams.attachDefName, "")
 	_ = iptablesEIPClient.CreateSync(eip2)
 	eip2 = waitForIptablesEIPReady(iptablesEIPClient, vpcQosParams.vpc2EIPName, 60*time.Second)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up eip " + vpcQosParams.vpc2EIPName)
 		iptablesEIPClient.DeleteSync(vpcQosParams.vpc2EIPName)
 	})
@@ -829,7 +829,7 @@ func setupQosTestResources(
 	ginkgo.By("Creating fip " + vpcQosParams.vpc2FIPName)
 	fip2 := framework.MakeIptablesFIPRule(vpcQosParams.vpc2FIPName, vpcQosParams.vpc2EIPName, pod2.Status.PodIP)
 	_ = iptablesFIPClient.CreateSync(fip2)
-	ginkgo.DeferCleanup(func() {
+	framework.SkippableCleanup(func() {
 		ginkgo.By("Cleaning up fip " + vpcQosParams.vpc2FIPName)
 		iptablesFIPClient.DeleteSync(vpcQosParams.vpc2FIPName)
 	})
@@ -961,7 +961,7 @@ var _ = framework.OrderedDescribe("[group:qos-policy]", func() {
 			f, dockerExtNetNetwork, attachNetClient,
 			subnetClient, networkAttachDefName, net1NicName, externalSubnetProvider, dockerExtNetName)
 
-		ginkgo.DeferCleanup(func() {
+		framework.SkippableCleanup(func() {
 			ginkgo.By("Cleaning up shared macvlan underlay subnet " + networkAttachDefName)
 			subnetClient.DeleteSync(networkAttachDefName)
 			ginkgo.By("Cleaning up shared nad " + networkAttachDefName)

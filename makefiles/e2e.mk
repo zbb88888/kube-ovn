@@ -211,6 +211,7 @@ iptables-eip-conformance-e2e:
 	E2E_BRANCH=$(E2E_BRANCH) \
 	E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 	E2E_NETWORK_MODE=$(E2E_NETWORK_MODE) \
+	E2E_SKIP_CLEANUP=$(E2E_SKIP_CLEANUP) \
 	$(GINKGO_E2E_RUN_PARALLEL) --focus=CNI:Kube-OVN ./test/e2e/iptables-vpc-nat-gw/iptables-vpc-nat-gw.test -- $(TEST_BIN_ARGS)
 
 .PHONY: iptables-eip-qos-conformance-e2e
@@ -219,6 +220,7 @@ iptables-eip-qos-conformance-e2e:
 	E2E_BRANCH=$(E2E_BRANCH) \
 	E2E_IP_FAMILY=$(E2E_IP_FAMILY) \
 	E2E_NETWORK_MODE=$(E2E_NETWORK_MODE) \
+	E2E_SKIP_CLEANUP=$(E2E_SKIP_CLEANUP) \
 	$(GINKGO_E2E_RUN_PARALLEL) --focus=CNI:Kube-OVN ./test/e2e/iptables-eip-qos/iptables-eip-qos.test -- $(TEST_BIN_ARGS)
 
 .PHONY: iptables-vpc-nat-gw-conformance-e2e

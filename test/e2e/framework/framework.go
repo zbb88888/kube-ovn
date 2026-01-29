@@ -80,6 +80,27 @@ type Framework struct {
 	KubeOVNImageTag    string
 }
 
+// SkipCleanup returns true if E2E_SKIP_CLEANUP is set to "true" or "1".
+// When true, test resources will NOT be cleaned up after tests finish,
+// allowing manual inspection and debugging.
+func SkipCleanup() bool {
+	v := os.Getenv("E2E_SKIP_CLEANUP")
+	return v == "true" || v == "1"
+}
+
+// SkippableCleanup wraps ginkgo.DeferCleanup but skips the cleanup
+// if E2E_SKIP_CLEANUP is set. Use this for resources you want to
+// keep for manual testing/debugging.
+func SkippableCleanup(cleanup func()) {
+	ginkgo.DeferCleanup(func() {
+		if SkipCleanup() {
+			Logf("Skipping cleanup due to E2E_SKIP_CLEANUP=true")
+			return
+		}
+		cleanup()
+	})
+}
+
 func (f *Framework) parseEnv() {
 	f.ClusterIPFamily = os.Getenv("E2E_IP_FAMILY")
 	f.ClusterNetworkMode = os.Getenv("E2E_NETWORK_MODE")
