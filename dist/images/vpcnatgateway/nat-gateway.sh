@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+set -euo pipefail
+
 # Network interfaces configuration
 #
 # ============================================================================
@@ -106,9 +108,13 @@ function exec_cmd() {
     fi
 }
 
+# Escape dots for grep regex matching (e.g., "192.168.1.1/32" -> "192\.168\.1\.1/32")
+function escape_for_regex() {
+    echo "$1" | sed 's/\./\\./g'
+}
+
 function check_inited() {
-    $iptables_save_cmd -t nat | grep SNAT_FILTER | grep SHARED_SNAT
-    if [ $? -ne 0 ]; then
+    if ! $iptables_cmd -t nat -S SHARED_SNAT >/dev/null 2>&1; then
         >&2 echo "nat gateway not initialized"
         exit 1
     fi
@@ -153,7 +159,9 @@ function init() {
     echo "EXTERNAL_INTERFACE=$EXTERNAL_INTERFACE" >> /etc/kube-ovn/nat-gateway.env
 
     # run once is enough
-    $iptables_save_cmd | grep DNAT_FILTER && exit 0
+    if $iptables_cmd -t nat -S DNAT_FILTER >/dev/null 2>&1; then
+        exit 0
+    fi
     # add static chain
     # this also a flag to make sure init once
     $iptables_cmd -t nat -N DNAT_FILTER
@@ -211,9 +219,13 @@ function get_iptables_version() {
 }
 
 function add_vpc_internal_route() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_vpc_internal_route rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         cidr=${arr[0]}
@@ -224,9 +236,13 @@ function add_vpc_internal_route() {
 }
 
 function del_vpc_internal_route() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_vpc_internal_route rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         cidr=${arr[0]}
@@ -251,9 +267,13 @@ function del_vpc_external_route() {
 }
 
 function add_eip() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_eip eip1 [eip2...]"
+        exit 1
+    fi
     # make sure inited
    check_inited
-    for rule in $@
+    for rule in "$@"
     do
         eip=${rule}
         eip_without_prefix=(${eip//\// })
@@ -271,13 +291,19 @@ function add_eip() {
 }
 
 function del_eip() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_eip eip1 [eip2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=${arr[0]}
-        ipCidr=`ip addr show $EXTERNAL_INTERFACE | grep $eip | awk '{print $2 }'`
+        local escaped_eip=$(escape_for_regex "$eip")
+        # Match exactly the IP, followed by /
+        ipCidr=$(ip addr show "$EXTERNAL_INTERFACE" | grep -E "inet ${escaped_eip}/" | awk '{print $2}' | head -n 1 || true)
         if [ -n "$ipCidr" ]; then
             exec_cmd "ip addr del $ipCidr dev $EXTERNAL_INTERFACE"
         fi
@@ -303,52 +329,82 @@ function is_internal_cidr() {
 }
 
 function add_floating_ip() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_floating_ip rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    local all_nat_rules
+    all_nat_rules=$($iptables_save_cmd -t nat || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalIp=${arr[1]}
-        # check if already exist
-        $iptables_save_cmd | grep EXCLUSIVE_DNAT | grep -w "\-d $eip/32" | grep destination && exit 0
+        local escaped_eip=$(escape_for_regex "$eip")
+        local escaped_internal=$(escape_for_regex "$internalIp")
+        # check if already exist, normalized to /32 by iptables-save
+        if echo "$all_nat_rules" | grep -qE "^-A EXCLUSIVE_DNAT -d ${escaped_eip}/32 (-j DNAT --to-destination|--to-destination) ${escaped_internal}(\s|$)"; then
+            continue
+        fi
         exec_cmd "$iptables_cmd -t nat -A EXCLUSIVE_DNAT -d $eip -j DNAT --to-destination $internalIp"
         exec_cmd "$iptables_cmd -t nat -A EXCLUSIVE_SNAT -s $internalIp -j SNAT --to-source $eip"
     done
 }
 
 function del_floating_ip() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_floating_ip rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    local all_nat_rules
+    all_nat_rules=$($iptables_save_cmd -t nat || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalIp=${arr[1]}
+        local escaped_eip=$(escape_for_regex "$eip")
+        local escaped_internal=$(escape_for_regex "$internalIp")
         # check if already exist
-        $iptables_save_cmd  | grep EXCLUSIVE_DNAT | grep -w "\-d $eip/32" | grep destination
-        if [ "$?" -eq 0 ];then
+        if echo "$all_nat_rules" | grep -qE "^-A EXCLUSIVE_DNAT -d ${escaped_eip}/32 (-j DNAT --to-destination|--to-destination) ${escaped_internal}(\s|$)"; then
             exec_cmd "$iptables_cmd -t nat -D EXCLUSIVE_DNAT -d $eip -j DNAT --to-destination $internalIp"
             exec_cmd "$iptables_cmd -t nat -D EXCLUSIVE_SNAT -s $internalIp -j SNAT --to-source $eip"
-            conntrack -D -d $eip 2>/dev/null || true
+            conntrack -D -d "$eip" 2>/dev/null || true
         fi
     done
 }
 
 function add_snat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_snat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
     local all_shared_snat_rules
-    all_shared_snat_rules=$($iptables_save_cmd -t nat | grep SHARED_SNAT)
+    all_shared_snat_rules=$($iptables_save_cmd -t nat | grep SHARED_SNAT || true)
     declare -A internal_cidrs_cache
-    for rule in $@
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalCIDR=${arr[1]}
-        randomFullyOption=${arr[2]}
+        randomFullyOption=${arr[2]:-}
+        local escaped_cidr=$(escape_for_regex "$internalCIDR")
+        local escaped_eip=$(escape_for_regex "$eip")
         # check if already exist, skip adding if exists (idempotent)
-        ruleMatch=$(echo "$all_shared_snat_rules" | grep -w -- "-s $internalCIDR" | grep -E -- "--to-source $eip(\$| )")
+        # Handle cases with and without /32 for single IPs
+        local ruleMatch
+        if [[ "$internalCIDR" != */* ]]; then
+            ruleMatch=$(echo "$all_shared_snat_rules" | grep -E -- "-s (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "--to-source ${escaped_eip}(\$| )" || true)
+        else
+            ruleMatch=$(echo "$all_shared_snat_rules" | grep -E -- "-s ${escaped_cidr} " | grep -E -- "--to-source ${escaped_eip}(\$| )" || true)
+        fi
+
         if [ -z "$ruleMatch" ]; then
             exec_cmd "$iptables_cmd -t nat -A SHARED_SNAT -o $EXTERNAL_INTERFACE -s $internalCIDR -j SNAT --to-source $eip $randomFullyOption"
         fi
@@ -368,18 +424,30 @@ function add_snat() {
     done
 }
 function del_snat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_snat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
     local all_shared_snat_rules
-    all_shared_snat_rules=$($iptables_save_cmd -t nat | grep SHARED_SNAT)
+    all_shared_snat_rules=$($iptables_save_cmd -t nat | grep SHARED_SNAT || true)
     declare -A internal_cidrs_cache
-    for rule in $@
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalCIDR=${arr[1]}
+        local escaped_cidr=$(escape_for_regex "$internalCIDR")
+        local escaped_eip=$(escape_for_regex "$eip")
         # check if already exist
-        ruleMatch=$(echo "$all_shared_snat_rules" | grep -w -- "-s $internalCIDR" | grep -E -- "--to-source $eip(\$| )" | head -1)
+        local ruleMatch
+        if [[ "$internalCIDR" != */* ]]; then
+            ruleMatch=$(echo "$all_shared_snat_rules" | grep -E -- "-s (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "--to-source ${escaped_eip}(\$| )" | head -1 || true)
+        else
+            ruleMatch=$(echo "$all_shared_snat_rules" | grep -E -- "-s ${escaped_cidr} " | grep -E -- "--to-source ${escaped_eip}(\$| )" | head -1 || true)
+        fi
+
         if [ -n "$ruleMatch" ]; then
           ruleMatch=$(echo "$ruleMatch" | sed 's/-A //')
           exec_cmd "$iptables_cmd -t nat -D $ruleMatch"
@@ -421,19 +489,33 @@ function del_snat() {
 # Example: 10.1.69.219,10.0.1.0/24,--random-fully
 # Creates: iptables -t nat -A HAIRPIN_SNAT -s 10.0.1.0/24 -d 10.0.1.0/24 -m conntrack --ctstate DNAT -j SNAT --to-source 10.1.69.219 --random-fully
 function add_hairpin_snat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_hairpin_snat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
     local all_hairpin_rules
-    all_hairpin_rules=$($iptables_save_cmd -t nat | grep HAIRPIN_SNAT)
-    for rule in $@
+    all_hairpin_rules=$($iptables_save_cmd -t nat | grep HAIRPIN_SNAT || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalCIDR=${arr[1]}
-        randomFullyOption=${arr[2]}
+        randomFullyOption=${arr[2]:-}
+
+        local escaped_cidr=$(escape_for_regex "$internalCIDR")
+        local escaped_eip=$(escape_for_regex "$eip")
 
         # Check if this exact rule already exists (idempotent)
-        if echo "$all_hairpin_rules" | grep -w -- "-s $internalCIDR" | grep -w -- "-d $internalCIDR" | grep -qE -- "--to-source $eip(\$| )"; then
+        local ruleMatch
+        if [[ "$internalCIDR" != */* ]]; then
+            ruleMatch=$(echo "$all_hairpin_rules" | grep -E -- "-s (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "-d (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "--to-source ${escaped_eip}(\$| )" || true)
+        else
+            ruleMatch=$(echo "$all_hairpin_rules" | grep -E -- "-s ${escaped_cidr} " | grep -E -- "-d ${escaped_cidr} " | grep -E -- "--to-source ${escaped_eip}(\$| )" || true)
+        fi
+
+        if [ -n "$ruleMatch" ]; then
             echo "Hairpin SNAT rule for $internalCIDR with EIP $eip already exists, skipping"
             continue
         fi
@@ -446,18 +528,30 @@ function add_hairpin_snat() {
 # Delete a hairpin SNAT rule.
 # Args: eip,internalCIDR (comma-separated)
 function del_hairpin_snat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_hairpin_snat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
     local all_hairpin_rules
-    all_hairpin_rules=$($iptables_save_cmd -t nat | grep HAIRPIN_SNAT)
-    for rule in $@
+    all_hairpin_rules=$($iptables_save_cmd -t nat | grep HAIRPIN_SNAT || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
         internalCIDR=${arr[1]}
+        local escaped_cidr=$(escape_for_regex "$internalCIDR")
+        local escaped_eip=$(escape_for_regex "$eip")
+
         # Use iptables-save output to construct -D command (preserves --random-fully etc.)
         local ruleMatch
-        ruleMatch=$(echo "$all_hairpin_rules" | grep -w -- "-s $internalCIDR" | grep -w -- "-d $internalCIDR" | grep -E -- "--to-source $eip(\$| )" | head -1)
+        if [[ "$internalCIDR" != */* ]]; then
+            ruleMatch=$(echo "$all_hairpin_rules" | grep -E -- "-s (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "-d (${escaped_cidr}|${escaped_cidr}/32) " | grep -E -- "--to-source ${escaped_eip}(\$| )" | head -1 || true)
+        else
+            ruleMatch=$(echo "$all_hairpin_rules" | grep -E -- "-s ${escaped_cidr} " | grep -E -- "-d ${escaped_cidr} " | grep -E -- "--to-source ${escaped_eip}(\$| )" | head -1 || true)
+        fi
+
         if [ -n "$ruleMatch" ]; then
             ruleMatch=$(echo "$ruleMatch" | sed 's/-A //')
             exec_cmd "$iptables_cmd -t nat -D $ruleMatch"
@@ -468,9 +562,15 @@ function del_hairpin_snat() {
 
 
 function add_dnat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: add_dnat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    local all_shared_dnat_rules
+    all_shared_dnat_rules=$($iptables_save_cmd -t nat | grep SHARED_DNAT || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
@@ -478,17 +578,30 @@ function add_dnat() {
         protocol=${arr[2]}
         internalIp=${arr[3]}
         internalPort=${arr[4]}
-        # check if already exist
-        $iptables_save_cmd | grep SHARED_DNAT | grep -w "\-d $eip/32" | grep "p $protocol" | grep -w "dport $dport"| grep -w "destination $internalIp:$internalPort" && exit 0
+        local escaped_eip=$(escape_for_regex "$eip")
+        local escaped_internal=$(escape_for_regex "$internalIp")
+        local escaped_protocol=$(escape_for_regex "$protocol")
+        # check if already exist, skip adding if exists (idempotent)
+        local ruleMatch
+        ruleMatch=$(echo "$all_shared_dnat_rules" | grep -E -- "-p ${escaped_protocol} " | grep -E -- "-d ${escaped_eip}/32 " | grep -E -- "--dport ${dport} " | grep -E -- "(-j DNAT --to-destination|--to-destination) ${escaped_internal}:${internalPort}(\s|$)" || true)
+        if [ -n "$ruleMatch" ]; then
+            continue
+        fi
         exec_cmd "$iptables_cmd -t nat -A SHARED_DNAT -p $protocol -d $eip --dport $dport -j DNAT --to-destination $internalIp:$internalPort"
     done
 }
 
 
 function del_dnat() {
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: del_dnat rule1 [rule2...]"
+        exit 1
+    fi
     # make sure inited
     check_inited
-    for rule in $@
+    local all_shared_dnat_rules
+    all_shared_dnat_rules=$($iptables_save_cmd -t nat | grep SHARED_DNAT || true)
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         eip=(${arr[0]//\// })
@@ -496,19 +609,19 @@ function del_dnat() {
         protocol=${arr[2]}
         internalIp=${arr[3]}
         internalPort=${arr[4]}
+        local escaped_eip=$(escape_for_regex "$eip")
+        local escaped_internal=$(escape_for_regex "$internalIp")
+        local escaped_protocol=$(escape_for_regex "$protocol")
         # check if already exist
-        $iptables_save_cmd | grep SHARED_DNAT | grep -w "\-d $eip/32" | grep "p $protocol" | grep -w "dport $dport"| grep -w "destination $internalIp:$internalPort"
-        if [ "$?" -eq 0 ];then
+        local ruleMatch
+        ruleMatch=$(echo "$all_shared_dnat_rules" | grep -E -- "-p ${escaped_protocol} " | grep -E -- "-d ${escaped_eip}/32 " | grep -E -- "--dport ${dport} " | grep -E -- "(-j DNAT --to-destination|--to-destination) ${escaped_internal}:${internalPort}(\s|$)" || true)
+        if [ -n "$ruleMatch" ]; then
           exec_cmd "$iptables_cmd -t nat -D SHARED_DNAT -p $protocol -d $eip --dport $dport -j DNAT --to-destination $internalIp:$internalPort"
         fi
     done
 }
 
 
-# Escape dots for grep regex matching (e.g., "192.168.1.1/32" -> "192\.168\.1\.1/32")
-function escape_for_regex() {
-    echo "$1" | sed 's/\./\\./g'
-}
 
 # Convert burst value (in MB, may be decimal like 1.5) to bytes for tc command
 # tc has issues parsing decimal values with unit suffixes (e.g., "1.5m" for cburst)
@@ -954,8 +1067,12 @@ function delete_ifb_filter_and_class() {
 # - HTB queues packets and applies backpressure, allowing TCP to adapt smoothly
 # - This results in actual throughput close to the configured rate limit
 function eip_ingress_qos_add() {
-    qos_debug "eip_ingress_qos_add called with args: $@"
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: eip_ingress_qos_add rule1 [rule2...]"
+        exit 1
+    fi
+    qos_debug "eip_ingress_qos_add called with args: $*"
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         local v4ip=${arr[0]}      # 172.21.0.23
@@ -1048,8 +1165,12 @@ function eip_ingress_qos_add() {
 #
 # Flow: internal --> $EXTERNAL_INTERFACE --> HTB class --> external
 function eip_egress_qos_add() {
-    qos_debug "eip_egress_qos_add called with args: $@"
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: eip_egress_qos_add rule1 [rule2...]"
+        exit 1
+    fi
+    qos_debug "eip_egress_qos_add called with args: $*"
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         local v4ip=${arr[0]}      # 172.21.0.23
@@ -1239,7 +1360,11 @@ function find_available_classid_for_cidr() {
 #   u32 filter:     "egress,net1,2,u32,ip,dst,192.168.1.1/32,25,25"
 #   matchall filter: "egress,net1,3,matchall,,,,30,30"
 function qos_add() {
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: qos_add rule1 [rule2...]"
+        exit 1
+    fi
+    for rule in "$@"
     do
         IFS=',' read -r -a arr <<< "$rule"
         local qdiscType=${arr[0]}        # ingress|egress
@@ -1369,7 +1494,11 @@ function qos_add() {
 #   u32 filter:     "egress,net1,2,u32,ip,dst,192.168.1.1/32"
 #   matchall filter: "egress,net1,3,matchall,,,"
 function qos_del() {
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: qos_del rule1 [rule2...]"
+        exit 1
+    fi
+    for rule in "$@"
     do
         IFS=',' read -r -a arr <<< "$rule"
         local qdiscType=${arr[0]}        # ingress|egress
@@ -1445,7 +1574,11 @@ function qos_del() {
 #
 # Note: Only IP is needed for deletion (rate/burst/priority not required)
 function eip_ingress_qos_del() {
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: eip_ingress_qos_del rule1 [rule2...]"
+        exit 1
+    fi
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         local v4ip=${arr[0]}  # 172.21.0.23
@@ -1489,7 +1622,11 @@ function eip_ingress_qos_del() {
 #
 # Note: Only IP is needed for deletion (rate/burst/priority not required)
 function eip_egress_qos_del() {
-    for rule in $@
+    if [ $# -lt 1 ]; then
+        >&2 echo "Usage: eip_egress_qos_del rule1 [rule2...]"
+        exit 1
+    fi
+    for rule in "$@"
     do
         arr=(${rule//,/ })
         local v4ip=${arr[0]}  # 172.21.0.23
@@ -1515,92 +1652,95 @@ function eip_egress_qos_del() {
 }
 
 
-rules=${@:2:${#}}
-opt=$1
+opt=${1:-help}
+if [ $# -gt 0 ]; then
+    shift
+fi
+
 case $opt in
     init)
         # get user interfaces if provided from input
-        interfaces="$rules"
+        interfaces="${1:-}"
         init "$interfaces"
         ;;
     subnet-route-add)
-        echo "subnet-route-add $rules"
-        add_vpc_internal_route $rules
+        echo "subnet-route-add $*"
+        add_vpc_internal_route "$@"
         ;;
     subnet-route-del)
-        echo "subnet-route-del $rules"
-        del_vpc_internal_route $rules
+        echo "subnet-route-del $*"
+        del_vpc_internal_route "$@"
         ;;
     eip-add)
-        echo "eip-add $rules"
-        add_eip $rules
+        echo "eip-add $*"
+        add_eip "$@"
         ;;
     eip-del)
-        echo "eip-del $rules"
-        del_eip $rules
+        echo "eip-del $*"
+        del_eip "$@"
         ;;
     dnat-add)
-        echo "dnat-add $rules"
-        add_dnat $rules
+        echo "dnat-add $*"
+        add_dnat "$@"
         ;;
     dnat-del)
-        echo "dnat-del $rules"
-        del_dnat $rules
+        echo "dnat-del $*"
+        del_dnat "$@"
         ;;
     snat-add)
-        echo "snat-add $rules"
-        add_snat $rules
+        echo "snat-add $*"
+        add_snat "$@"
         ;;
     snat-del)
-        echo "snat-del $rules"
-        del_snat $rules
+        echo "snat-del $*"
+        del_snat "$@"
         ;;
     hairpin-snat-add)
-        echo "hairpin-snat-add $rules"
-        add_hairpin_snat $rules
+        echo "hairpin-snat-add $*"
+        add_hairpin_snat "$@"
         ;;
     hairpin-snat-del)
-        echo "hairpin-snat-del $rules"
-        del_hairpin_snat $rules
+        echo "hairpin-snat-del $*"
+        del_hairpin_snat "$@"
         ;;
     floating-ip-add)
-        echo "floating-ip-add $rules"
-        add_floating_ip $rules
+        echo "floating-ip-add $*"
+        add_floating_ip "$@"
         ;;
     floating-ip-del)
-        echo "floating-ip-del $rules"
-        del_floating_ip $rules
+        echo "floating-ip-del $*"
+        del_floating_ip "$@"
         ;;
     get-iptables-version)
-        echo "get-iptables-version $rules"
-        get_iptables_version $rules
+        echo "get-iptables-version $*"
+        get_iptables_version "$@"
         ;;
     help|--help|-h)
         show_help
         ;;
     eip-ingress-qos-add)
-        echo "eip-ingress-qos-add $rules"
-        eip_ingress_qos_add $rules
+        echo "eip-ingress-qos-add $*"
+        eip_ingress_qos_add "$@"
         ;;
     eip-egress-qos-add)
-        echo "eip-egress-qos-add $rules"
-        eip_egress_qos_add $rules
+        echo "eip-egress-qos-add $*"
+        eip_egress_qos_add "$@"
         ;;
     eip-ingress-qos-del)
-        echo "eip-ingress-qos-del $rules"
-        eip_ingress_qos_del $rules
+        echo "eip-ingress-qos-del $*"
+        eip_ingress_qos_del "$@"
         ;;
     eip-egress-qos-del)
-        echo "eip-egress-qos-del $rules"
-        eip_egress_qos_del $rules
+        echo "eip-egress-qos-del $*"
+        eip_egress_qos_del "$@"
         ;;
     qos-add)
-        echo "qos-add $rules"
-        qos_add $rules
+        echo "qos-add $*"
+        qos_add "$@"
         ;;
     qos-del)
-        echo "qos-del $rules"
-        qos_del $rules
+        echo "qos-del $*"
+        qos_del "$@"
         ;;
     *)
         echo "Unknown command: $opt"

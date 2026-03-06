@@ -763,9 +763,9 @@ func (c *Controller) execNatGwRules(pod *corev1.Pod, operation string, rules []s
 		_ = c.vpcNatGwExecKeyMutex.UnlockKey(lockKey)
 	}()
 
-	cmd := fmt.Sprintf("bash /kube-ovn/nat-gateway.sh %s %s", operation, strings.Join(rules, " "))
-	klog.V(3).Infof("executing NAT gateway command: %s", cmd)
-	stdOutput, errOutput, err := util.ExecuteCommandInContainer(c.config.KubeClient, c.config.KubeRestConfig, pod.Namespace, pod.Name, "vpc-nat-gw", []string{"/bin/bash", "-c", cmd}...)
+	args := append([]string{"bash", "/kube-ovn/nat-gateway.sh", operation}, rules...)
+	klog.V(3).Infof("executing NAT gateway command: %s", strings.Join(args, " "))
+	stdOutput, errOutput, err := util.ExecuteCommandInContainer(c.config.KubeClient, c.config.KubeRestConfig, pod.Namespace, pod.Name, "vpc-nat-gw", args...)
 	if err != nil {
 		if len(errOutput) > 0 {
 			klog.Errorf("NAT gateway command failed - stderr: %v", errOutput)
