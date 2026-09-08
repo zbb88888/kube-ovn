@@ -447,16 +447,16 @@ func (c *Controller) handleUpdateIptablesFip(key string) error {
 		if err = c.finalDeleteFipInPod(key, cachedFip); err != nil {
 			return err
 		}
+		if err = c.patchFipLabel(key, eip); err != nil {
+			klog.Errorf("failed to update label for fip %s before creating rule, %v", key, err)
+			return err
+		}
 		if err = c.createFipInPod(eip.Spec.NatGwDp, newV4ip, newInternalIP); err != nil {
 			klog.Errorf("failed to create fip %s, %v", key, err)
 			return err
 		}
 		if err = c.patchFipStatus(key, newV4ip, eip.Spec.V6ip, eip.Spec.NatGwDp, "", true); err != nil {
 			klog.Errorf("failed to patch status for fip %s, %v", key, err)
-			return err
-		}
-		if err = c.patchFipLabel(key, eip); err != nil {
-			klog.Errorf("failed to update label for fip %s, %v", key, err)
 			return err
 		}
 		if err = c.patchEipStatus(cachedFip.Spec.EIP, "", "", "", true); err != nil {
@@ -761,6 +761,10 @@ func (c *Controller) handleUpdateIptablesDnatRule(key string) error {
 		if err = c.finalDeleteDnatInPod(key, cachedDnat); err != nil {
 			return err
 		}
+		if err = c.patchDnatLabel(key, eip); err != nil {
+			klog.Errorf("failed to patch label for dnat %s before creating rule, %v", key, err)
+			return err
+		}
 
 		switch cachedDnat.Spec.Type {
 		case kubeovnv1.DnatRuleTypeShare:
@@ -786,10 +790,6 @@ func (c *Controller) handleUpdateIptablesDnatRule(key string) error {
 		}
 		if err = c.patchDnatStatus(key, newV4ip, eip.Spec.V6ip, eip.Spec.NatGwDp, "", true); err != nil {
 			klog.Errorf("failed to patch status for dnat %s, %v", key, err)
-			return err
-		}
-		if err = c.patchDnatLabel(key, eip); err != nil {
-			klog.Errorf("failed to patch label for dnat %s, %v", key, err)
 			return err
 		}
 		if err = c.patchEipStatus(cachedDnat.Spec.EIP, "", "", "", true); err != nil {
@@ -1092,16 +1092,16 @@ func (c *Controller) handleUpdateIptablesSnatRule(key string) error {
 		if err = c.finalDeleteSnatInPod(key, cachedSnat); err != nil {
 			return err
 		}
+		if err = c.patchSnatLabel(key, eip); err != nil {
+			klog.Errorf("failed to patch label for snat %s before creating rule, %v", key, err)
+			return err
+		}
 		if err = c.createSnatInPod(eip.Spec.NatGwDp, newV4ip, newV4Cidr); err != nil {
 			klog.Errorf("failed to create snat %s, %v", key, err)
 			return err
 		}
 		if err = c.patchSnatStatus(key, newV4ip, eip.Spec.V6ip, eip.Spec.NatGwDp, "", true); err != nil {
 			klog.Errorf("failed to patch status for snat %s, %v", key, err)
-			return err
-		}
-		if err = c.patchSnatLabel(key, eip); err != nil {
-			klog.Errorf("failed to patch label for snat %s, %v", key, err)
 			return err
 		}
 		if err = c.patchEipStatus(cachedSnat.Spec.EIP, "", "", "", true); err != nil {
