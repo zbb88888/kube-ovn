@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
@@ -138,6 +139,70 @@ func TestQoSPolicyUID(t *testing.T) {
 
 	_, err = fc.fakeController.qosPolicyUID("missing")
 	require.Error(t, err)
+}
+
+func TestIptablesEipDeleteHonorsUIDClaim(t *testing.T) {
+	oldEnabled := vpcNatEnabled
+	vpcNatEnabled = "false"
+	t.Cleanup(func() { vpcNatEnabled = oldEnabled })
+	newEip := func() *kubeovnv1.IptablesEIP {
+		now := metav1.Now()
+		return &kubeovnv1.IptablesEIP{
+			Name: "eip-delete", UID: "eip-delete-uid", DeletionTimestamp: &now,
+			Finalizers: []string{util.KubeOVNControllerFinalizer}}
+	}
+
+	t.Run("matching claim blocks finalizer removal", func(t *testing.T) {
+		eip := newEip()
+		fip := &kubeovnv1.IptablesFIPRule{
+			Name: "fip", Labels: map[string]string{util.EipUIDLabel: string(eip.UID)}}
+		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+			IptablesEips: []*kubeovnv1.IptablesEIP{eip}, IptablesFips: []*kubeovnv1.IptablesFIPRule{fip},
+		})
+		require.NoError(t, err)
+		require.NoError(t, fc.fakeController.handleUpdateIptablesEip(eip.Name))
+		got, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Get(context.Background(), eip.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Contains(t, got.Finalizers, util.KubeOVNControllerFinalizer)
+	})
+
+	t.Run("different UID does not block finalizer removal", func(t *testing.T) {
+		eip := newEip()
+		fip := &kubeovnv1.IptablesFIPRule{
+			Name: "fip", Labels: map[string]string{util.EipUIDLabel: "other-uid", util.EipV4IpLabel: "same-address"}}
+		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+			IptablesEips: []*kubeovnv1.IptablesEIP{eip}, IptablesFips: []*kubeovnv1.IptablesFIPRule{fip},
+		})
+		require.NoError(t, err)
+		require.NoError(t, fc.fakeController.handleUpdateIptablesEip(eip.Name))
+		got, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Get(context.Background(), eip.Name, metav1.GetOptions{})
+		if err == nil {
+			require.NotContains(t, got.Finalizers, util.KubeOVNControllerFinalizer)
+		} else {
+			require.True(t, k8serrors.IsNotFound(err))
+		}
+	})
+}
+
+func TestGetIptablesEipNatUsesUID(t *testing.T) {
+	eip := &kubeovnv1.IptablesEIP{Name: "eip", UID: "eip-uid"}
+	makeLabels := func(uid string) map[string]string {
+		return map[string]string{util.EipUIDLabel: uid}
+	}
+	fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		IptablesEips: []*kubeovnv1.IptablesEIP{eip},
+		IptablesFips: []*kubeovnv1.IptablesFIPRule{
+			{Name: "same", Labels: makeLabels("eip-uid")},
+			{Name: "other", Labels: makeLabels("other-uid")},
+		},
+		IptablesDnatRules: []*kubeovnv1.IptablesDnatRule{
+			{Name: "dnat", Labels: makeLabels("eip-uid")},
+		},
+	})
+	require.NoError(t, err)
+	got, err := fc.fakeController.getIptablesEipNat(eip)
+	require.NoError(t, err)
+	require.Equal(t, util.DnatUsingEip+","+util.FipUsingEip, got)
 }
 
 func TestNatGwDeleted(t *testing.T) {
