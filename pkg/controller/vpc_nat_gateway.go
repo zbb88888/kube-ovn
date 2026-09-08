@@ -128,7 +128,12 @@ func (c *Controller) resyncVpcNatGwConfig() {
 }
 
 func (c *Controller) enqueueAddVpcNatGw(obj any) {
-	key := cache.MetaObjectToName(obj.(*kubeovnv1.VpcNatGateway)).String()
+	gw := obj.(*kubeovnv1.VpcNatGateway)
+	key := cache.MetaObjectToName(gw).String()
+	if !gw.DeletionTimestamp.IsZero() {
+		c.delVpcNatGatewayQueue.Add(key)
+		return
+	}
 	klog.V(3).Infof("enqueue add vpc-nat-gw %s", key)
 	c.addOrUpdateVpcNatGatewayQueue.Add(key)
 }
@@ -145,6 +150,10 @@ func (c *Controller) enqueueUpdateVpcNatGw(oldObj, newObj any) {
 	oldGw := oldObj.(*kubeovnv1.VpcNatGateway)
 	newGw := newObj.(*kubeovnv1.VpcNatGateway)
 	key := cache.MetaObjectToName(newGw).String()
+	if !newGw.DeletionTimestamp.IsZero() {
+		c.delVpcNatGatewayQueue.Add(key)
+		return
+	}
 	klog.V(3).Infof("enqueue update vpc-nat-gw %s", key)
 	c.addOrUpdateVpcNatGatewayQueue.Add(key)
 
@@ -594,6 +603,9 @@ func (c *Controller) handleInitVpcNatGw(key string) (retErr error) {
 		}
 	}()
 
+	if !gw.DeletionTimestamp.IsZero() {
+		return nil
+	}
 	if vpcNatEnabled != "true" {
 		return errors.New("iptables nat gw not enable")
 	}
@@ -1760,6 +1772,21 @@ func (c *Controller) updateCrdNatGwLabels(key, qos string) error {
 		klog.Error(errMsg)
 		return errMsg
 	}
+	qosUID := ""
+	if qos != "" {
+		policy, err := c.qosPoliciesLister.Get(qos)
+		switch {
+		case err != nil && oriGw.DeletionTimestamp.IsZero():
+			return fmt.Errorf("failed to get qos policy %s: %w", qos, err)
+		case err != nil:
+			qosUID = oriGw.Labels[util.QoSPolicyUIDLabel]
+		case !policy.DeletionTimestamp.IsZero() && oriGw.DeletionTimestamp.IsZero() && oriGw.Labels[util.QoSLabel] != qos:
+			return fmt.Errorf("qos policy %s is terminating", qos)
+		default:
+			qosUID = string(policy.UID)
+		}
+	}
+
 	var needUpdateLabel bool
 	var op string
 
@@ -1773,6 +1800,7 @@ func (c *Controller) updateCrdNatGwLabels(key, qos string) error {
 		labels[util.SubnetNameLabel] = oriGw.Spec.Subnet
 		labels[util.VpcNameLabel] = oriGw.Spec.Vpc
 		labels[util.QoSLabel] = qos
+		labels[util.QoSPolicyUIDLabel] = qosUID
 		needUpdateLabel = true
 	} else {
 		if oriGw.Labels[util.SubnetNameLabel] != oriGw.Spec.Subnet {
@@ -1785,9 +1813,10 @@ func (c *Controller) updateCrdNatGwLabels(key, qos string) error {
 			labels[util.VpcNameLabel] = oriGw.Spec.Vpc
 			needUpdateLabel = true
 		}
-		if oriGw.Labels[util.QoSLabel] != qos {
+		if oriGw.Labels[util.QoSLabel] != qos || oriGw.Labels[util.QoSPolicyUIDLabel] != qosUID {
 			op = "replace"
 			labels[util.QoSLabel] = qos
+			labels[util.QoSPolicyUIDLabel] = qosUID
 			needUpdateLabel = true
 		}
 	}

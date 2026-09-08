@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
 	"github.com/kubeovn/kube-ovn/pkg/util"
@@ -799,7 +800,7 @@ func makeQoSPolicyForUpdate(name string, shared bool, bindingType kubeovnv1.QoSP
 	statusRules, specRules kubeovnv1.QoSPolicyBandwidthLimitRules,
 ) *kubeovnv1.QoSPolicy {
 	return &kubeovnv1.QoSPolicy{
-		Name: name,
+		Name: name, UID: types.UID(name + "-uid"),
 		Spec: kubeovnv1.QoSPolicySpec{
 			Shared:              shared,
 			BindingType:         bindingType,
@@ -850,8 +851,11 @@ func TestHandleUpdateQoSPolicy(t *testing.T) {
 	eips := make([]*kubeovnv1.IptablesEIP, 0, 2)
 	for _, name := range []string{"eip-1", "eip-2"} {
 		eips = append(eips, &kubeovnv1.IptablesEIP{
-			Name:   name,
-			Labels: map[string]string{util.QoSLabel: multiEIPQoS.Name},
+			Name: name,
+			Labels: map[string]string{
+				util.QoSLabel:          multiEIPQoS.Name,
+				util.QoSPolicyUIDLabel: string(multiEIPQoS.UID),
+			},
 			Spec:   kubeovnv1.IptablesEIPSpec{QoSPolicy: multiEIPQoS.Name},
 			Status: kubeovnv1.IptablesEIPStatus{IP: "172.20.0.10"},
 		})

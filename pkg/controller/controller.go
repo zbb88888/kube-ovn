@@ -1221,6 +1221,9 @@ func (c *Controller) Run(ctx context.Context) {
 	if err := c.syncFinalizers(); err != nil {
 		util.LogFatalAndExit(err, "failed to initialize crd finalizers")
 	}
+	if err := c.syncNatUIDLabels(); err != nil {
+		util.LogFatalAndExit(err, "failed to migrate NAT UID labels")
+	}
 
 	if err := c.InitIPAM(); err != nil {
 		util.LogFatalAndExit(err, "failed to initialize ipam")

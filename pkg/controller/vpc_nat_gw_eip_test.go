@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeovnv1 "github.com/kubeovn/kube-ovn/pkg/apis/kubeovn/v1"
+	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
 // fakeGw returns a minimal VpcNatGateway CRD object for use in tests.
@@ -15,6 +17,52 @@ func fakeGw(name string) *kubeovnv1.VpcNatGateway {
 		Name: name,
 		Spec: kubeovnv1.VpcNatGatewaySpec{},
 	}
+}
+
+func TestSyncNatUIDLabels(t *testing.T) {
+	t.Parallel()
+	qos := &kubeovnv1.QoSPolicy{Name: "qos", UID: "qos-uid"}
+	eip := &kubeovnv1.IptablesEIP{
+		Name: "eip", UID: "eip-uid",
+		Spec: kubeovnv1.IptablesEIPSpec{QoSPolicy: "qos"},
+	}
+	fip := &kubeovnv1.IptablesFIPRule{
+		Name: "fip",
+		Spec: kubeovnv1.IptablesFIPRuleSpec{EIP: "eip"},
+	}
+	fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+		QoSPolicies:  []*kubeovnv1.QoSPolicy{qos},
+		IptablesEips: []*kubeovnv1.IptablesEIP{eip},
+	})
+	require.NoError(t, err)
+	_, err = fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesFIPRules().Create(context.Background(), fip, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, fc.fakeController.syncNatUIDLabels())
+
+	gotEip, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Get(context.Background(), "eip", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "qos-uid", gotEip.Labels[util.QoSPolicyUIDLabel])
+	gotFip, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesFIPRules().Get(context.Background(), "fip", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "eip-uid", gotFip.Labels[util.EipUIDLabel])
+}
+
+func TestQoSPolicyUID(t *testing.T) {
+	t.Parallel()
+	qos := &kubeovnv1.QoSPolicy{Name: "qos", UID: "qos-uid"}
+	fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{QoSPolicies: []*kubeovnv1.QoSPolicy{qos}})
+	require.NoError(t, err)
+
+	uid, err := fc.fakeController.qosPolicyUID(qos.Name)
+	require.NoError(t, err)
+	require.Equal(t, string(qos.UID), uid)
+
+	uid, err = fc.fakeController.qosPolicyUID("")
+	require.NoError(t, err)
+	require.Empty(t, uid)
+
+	_, err = fc.fakeController.qosPolicyUID("missing")
+	require.Error(t, err)
 }
 
 func TestNatGwDeleted(t *testing.T) {

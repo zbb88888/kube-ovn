@@ -27,6 +27,133 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
+// syncNatUIDLabels migrates legacy name/address references to UID labels.
+func (c *Controller) syncNatUIDLabels() error {
+	ctx := context.Background()
+	qos, err := c.config.KubeOvnClient.KubeovnV1().QoSPolicies().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	qosUID := make(map[string]string, len(qos.Items))
+	for i := range qos.Items {
+		qosUID[qos.Items[i].Name] = string(qos.Items[i].UID)
+	}
+
+	eips, err := c.config.KubeOvnClient.KubeovnV1().IptablesEIPs().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range eips.Items {
+		eip := eips.Items[i].DeepCopy()
+		uid := qosUID[eip.Spec.QoSPolicy]
+		hasBinding := eip.Labels[util.QoSLabel] == eip.Spec.QoSPolicy || eip.Status.QoSPolicy == eip.Spec.QoSPolicy
+		if uid == "" || (!eip.DeletionTimestamp.IsZero() && !hasBinding) || eip.Labels[util.QoSPolicyUIDLabel] == uid {
+			continue
+		}
+		if eip.Labels == nil {
+			eip.Labels = map[string]string{}
+		}
+		eip.Labels[util.QoSPolicyUIDLabel] = uid
+		if _, err = c.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Update(ctx, eip, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+	}
+
+	gws, err := c.config.KubeOvnClient.KubeovnV1().VpcNatGateways().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range gws.Items {
+		gw := gws.Items[i].DeepCopy()
+		uid := qosUID[gw.Spec.QoSPolicy]
+		hasBinding := gw.Labels[util.QoSLabel] == gw.Spec.QoSPolicy || gw.Status.QoSPolicy == gw.Spec.QoSPolicy
+		if uid == "" || (!gw.DeletionTimestamp.IsZero() && !hasBinding) || gw.Labels[util.QoSPolicyUIDLabel] == uid {
+			continue
+		}
+		if gw.Labels == nil {
+			gw.Labels = map[string]string{}
+		}
+		gw.Labels[util.QoSPolicyUIDLabel] = uid
+		if _, err = c.config.KubeOvnClient.KubeovnV1().VpcNatGateways().Update(ctx, gw, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
+	}
+	return c.syncNatRuleUIDLabels(ctx, eips.Items)
+}
+
+func (c *Controller) syncNatRuleUIDLabels(ctx context.Context, eips []kubeovnv1.IptablesEIP) error {
+	eipUID := make(map[string]string, len(eips))
+	for i := range eips {
+		eipUID[eips[i].Name] = string(eips[i].UID)
+	}
+	fips, err := c.config.KubeOvnClient.KubeovnV1().IptablesFIPRules().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range fips.Items {
+		if err = c.syncNatRuleUID(ctx, &fips.Items[i], eipUID); err != nil {
+			return err
+		}
+	}
+	dnats, err := c.config.KubeOvnClient.KubeovnV1().IptablesDnatRules().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range dnats.Items {
+		if err = c.syncNatRuleUID(ctx, &dnats.Items[i], eipUID); err != nil {
+			return err
+		}
+	}
+	snats, err := c.config.KubeOvnClient.KubeovnV1().IptablesSnatRules().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for i := range snats.Items {
+		if err = c.syncNatRuleUID(ctx, &snats.Items[i], eipUID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Controller) syncNatRuleUID(ctx context.Context, rule client.Object, eips map[string]string) error {
+	// The concrete rule types expose Spec.EIP; use the existing label when no migration target exists.
+	uid := rule.GetLabels()[util.EipUIDLabel]
+	if uid != "" {
+		return nil
+	}
+	var eipName string
+	switch obj := rule.(type) {
+	case *kubeovnv1.IptablesFIPRule:
+		eipName = obj.Spec.EIP
+	case *kubeovnv1.IptablesDnatRule:
+		eipName = obj.Spec.EIP
+	case *kubeovnv1.IptablesSnatRule:
+		eipName = obj.Spec.EIP
+	}
+	uid = eips[eipName]
+	if uid == "" || (!rule.GetDeletionTimestamp().IsZero() && rule.GetLabels()[util.EipV4IpLabel] == "") {
+		return nil
+	}
+	updated := rule.DeepCopyObject().(client.Object)
+	labelsCopy := maps.Clone(rule.GetLabels())
+	if labelsCopy == nil {
+		labelsCopy = map[string]string{}
+	}
+	labelsCopy[util.EipUIDLabel] = uid
+	updated.SetLabels(labelsCopy)
+	var err error
+	switch obj := updated.(type) {
+	case *kubeovnv1.IptablesFIPRule:
+		_, err = c.config.KubeOvnClient.KubeovnV1().IptablesFIPRules().Update(ctx, obj, metav1.UpdateOptions{})
+	case *kubeovnv1.IptablesDnatRule:
+		_, err = c.config.KubeOvnClient.KubeovnV1().IptablesDnatRules().Update(ctx, obj, metav1.UpdateOptions{})
+	case *kubeovnv1.IptablesSnatRule:
+		_, err = c.config.KubeOvnClient.KubeovnV1().IptablesSnatRules().Update(ctx, obj, metav1.UpdateOptions{})
+	}
+	return err
+}
+
 func (c *Controller) InitOVN() error {
 	var err error
 

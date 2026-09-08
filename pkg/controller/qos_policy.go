@@ -420,27 +420,27 @@ func (c *Controller) handleUpdateQoSPolicy(key string) error {
 		// Check if the QoS policy is still being used before allowing deletion
 		var inUse bool
 		if cachedQos.Spec.BindingType == kubeovnv1.QoSBindingTypeEIP {
-			eips, err := c.iptablesEipsLister.List(
-				labels.SelectorFromSet(labels.Set{util.QoSLabel: key}),
-			)
+			eips, err := c.config.KubeOvnClient.KubeovnV1().IptablesEIPs().List(context.Background(), metav1.ListOptions{
+				LabelSelector: labels.Set{util.QoSPolicyUIDLabel: string(cachedQos.UID)}.AsSelector().String(),
+			})
 			// when eip is not found, we should delete finalizer
 			if err != nil && !k8serrors.IsNotFound(err) {
 				klog.Errorf("failed to get eip list, %v", err)
 				return err
 			}
-			inUse = len(eips) != 0
+			inUse = len(eips.Items) != 0
 		}
 
 		if cachedQos.Spec.BindingType == kubeovnv1.QoSBindingTypeNatGw {
-			gws, err := c.vpcNatGatewayLister.List(
-				labels.SelectorFromSet(labels.Set{util.QoSLabel: key}),
-			)
+			gws, err := c.config.KubeOvnClient.KubeovnV1().VpcNatGateways().List(context.Background(), metav1.ListOptions{
+				LabelSelector: labels.Set{util.QoSPolicyUIDLabel: string(cachedQos.UID)}.AsSelector().String(),
+			})
 			// when nat gw is not found, we should delete finalizer
 			if err != nil && !k8serrors.IsNotFound(err) {
 				klog.Errorf("failed to get gw list, %v", err)
 				return err
 			}
-			inUse = len(gws) != 0
+			inUse = len(gws.Items) != 0
 		}
 
 		if inUse {
@@ -492,7 +492,7 @@ func (c *Controller) handleUpdateQoSPolicy(key string) error {
 		if cachedQos.Status.BindingType == kubeovnv1.QoSBindingTypeEIP {
 			// filter to eip
 			eips, err := c.iptablesEipsLister.List(
-				labels.SelectorFromSet(labels.Set{util.QoSLabel: key}),
+				labels.SelectorFromSet(labels.Set{util.QoSPolicyUIDLabel: string(cachedQos.UID)}),
 			)
 			if err != nil {
 				klog.Errorf("failed to get eip list, %v", err)

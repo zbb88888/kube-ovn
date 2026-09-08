@@ -223,6 +223,10 @@ func (c *Controller) handleAddIptablesFip(key string) error {
 		return errors.New("iptables nat gw not enable")
 	}
 
+	if !fip.DeletionTimestamp.IsZero() {
+		return c.handleUpdateIptablesFip(key)
+	}
+
 	c.vpcNatGwKeyMutex.LockKey(key)
 	defer func() { _ = c.vpcNatGwKeyMutex.UnlockKey(key) }()
 	klog.Infof("handle add iptables fip %s", key)
@@ -243,7 +247,7 @@ func (c *Controller) handleAddIptablesFip(key string) error {
 		return err
 	}
 
-	if err = c.fipTryUseEip(key, eip.Spec.V4ip); err != nil {
+	if err = c.fipTryUseEip(key, eip); err != nil {
 		err = fmt.Errorf("failed to create fip %s, %w", key, err)
 		klog.Error(err)
 		return err
@@ -284,9 +288,9 @@ func (c *Controller) handleAddIptablesFip(key string) error {
 	return nil
 }
 
-func (c *Controller) fipTryUseEip(fipName, eipV4IP string) error {
-	// check if has another fip using this eip already
-	selector := labels.SelectorFromSet(labels.Set{util.EipV4IpLabel: eipV4IP})
+func (c *Controller) fipTryUseEip(fipName string, eip *kubeovnv1.IptablesEIP) error {
+	// check if another FIP already uses this EIP generation
+	selector := labels.SelectorFromSet(labels.Set{util.EipUIDLabel: string(eip.UID)})
 	usingFips, err := c.iptablesFipsLister.List(selector)
 	if err != nil {
 		klog.Errorf("failed to get fips, %v", err)
@@ -294,7 +298,7 @@ func (c *Controller) fipTryUseEip(fipName, eipV4IP string) error {
 	}
 	for _, uf := range usingFips {
 		if uf.Name != fipName {
-			err = fmt.Errorf("%s is used by the other fip %s", eipV4IP, uf.Name)
+			err = fmt.Errorf("%s is used by the other fip %s", eip.Spec.V4ip, uf.Name)
 			klog.Error(err)
 			return err
 		}
@@ -389,7 +393,7 @@ func (c *Controller) handleUpdateIptablesFip(key string) error {
 		return err
 	}
 
-	if err = c.fipTryUseEip(key, eip.Spec.V4ip); err != nil {
+	if err = c.fipTryUseEip(key, eip); err != nil {
 		err = fmt.Errorf("failed to update fip %s, %w", key, err)
 		klog.Error(err)
 		return err
@@ -547,6 +551,10 @@ func (c *Controller) handleAddIptablesDnatRule(key string) error {
 
 	if vpcNatEnabled != "true" {
 		return errors.New("iptables nat gw not enable")
+	}
+
+	if !dnat.DeletionTimestamp.IsZero() {
+		return c.handleUpdateIptablesDnatRule(key)
 	}
 
 	c.vpcNatGwKeyMutex.LockKey(key)
@@ -899,6 +907,10 @@ func (c *Controller) handleAddIptablesSnatRule(key string) error {
 
 	if vpcNatEnabled != "true" {
 		return errors.New("iptables nat gw not enable")
+	}
+
+	if !snat.DeletionTimestamp.IsZero() {
+		return c.handleUpdateIptablesSnatRule(key)
 	}
 
 	c.vpcNatGwKeyMutex.LockKey(key)
@@ -1320,13 +1332,16 @@ func (c *Controller) patchFipLabel(key string, eip *kubeovnv1.IptablesEIP) error
 		fip.Labels = map[string]string{
 			util.VpcNatGatewayNameLabel: eip.Spec.NatGwDp,
 			util.EipV4IpLabel:           eip.Spec.V4ip,
+			util.EipUIDLabel:            string(eip.UID),
 		}
 		needUpdateLabel = true
-	} else if fip.Labels[util.SubnetNameLabel] != eip.Spec.NatGwDp ||
-		fip.Labels[util.EipV4IpLabel] != eip.Spec.V4ip {
+	} else if fip.Labels[util.VpcNatGatewayNameLabel] != eip.Spec.NatGwDp ||
+		fip.Labels[util.EipV4IpLabel] != eip.Spec.V4ip ||
+		fip.Labels[util.EipUIDLabel] != string(eip.UID) {
 		op = "replace"
 		fip.Labels[util.VpcNatGatewayNameLabel] = eip.Spec.NatGwDp
 		fip.Labels[util.EipV4IpLabel] = eip.Spec.V4ip
+		fip.Labels[util.EipUIDLabel] = string(eip.UID)
 		needUpdateLabel = true
 	}
 	if needUpdateLabel {
@@ -1526,15 +1541,18 @@ func (c *Controller) patchDnatLabel(key string, eip *kubeovnv1.IptablesEIP) erro
 			util.VpcNatGatewayNameLabel: eip.Spec.NatGwDp,
 			util.VpcDnatEPortLabel:      dnat.Spec.ExternalPort,
 			util.EipV4IpLabel:           eip.Spec.V4ip,
+			util.EipUIDLabel:            string(eip.UID),
 		}
 		needUpdateLabel = true
 	} else if dnat.Labels[util.VpcNatGatewayNameLabel] != eip.Spec.NatGwDp ||
 		dnat.Labels[util.VpcDnatEPortLabel] != dnat.Spec.ExternalPort ||
-		dnat.Labels[util.EipV4IpLabel] != eip.Spec.V4ip {
+		dnat.Labels[util.EipV4IpLabel] != eip.Spec.V4ip ||
+		dnat.Labels[util.EipUIDLabel] != string(eip.UID) {
 		op = "replace"
 		dnat.Labels[util.VpcNatGatewayNameLabel] = eip.Spec.NatGwDp
 		dnat.Labels[util.VpcDnatEPortLabel] = dnat.Spec.ExternalPort
 		dnat.Labels[util.EipV4IpLabel] = eip.Spec.V4ip
+		dnat.Labels[util.EipUIDLabel] = string(eip.UID)
 		needUpdateLabel = true
 	}
 	if needUpdateLabel {
@@ -1667,13 +1685,16 @@ func (c *Controller) patchSnatLabel(key string, eip *kubeovnv1.IptablesEIP) erro
 		snat.Labels = map[string]string{
 			util.VpcNatGatewayNameLabel: eip.Spec.NatGwDp,
 			util.EipV4IpLabel:           eip.Spec.V4ip,
+			util.EipUIDLabel:            string(eip.UID),
 		}
 		needUpdateLabel = true
-	} else if snat.Labels[util.SubnetNameLabel] != eip.Spec.NatGwDp ||
-		snat.Labels[util.EipV4IpLabel] != eip.Spec.V4ip {
+	} else if snat.Labels[util.VpcNatGatewayNameLabel] != eip.Spec.NatGwDp ||
+		snat.Labels[util.EipV4IpLabel] != eip.Spec.V4ip ||
+		snat.Labels[util.EipUIDLabel] != string(eip.UID) {
 		op = "replace"
 		snat.Labels[util.VpcNatGatewayNameLabel] = eip.Spec.NatGwDp
 		snat.Labels[util.EipV4IpLabel] = eip.Spec.V4ip
+		snat.Labels[util.EipUIDLabel] = string(eip.UID)
 		needUpdateLabel = true
 	}
 	if needUpdateLabel {

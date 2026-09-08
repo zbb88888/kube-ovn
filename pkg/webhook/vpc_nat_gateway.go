@@ -206,15 +206,12 @@ func (v *ValidatingHook) iptablesEIPDeleteHook(ctx context.Context, req admissio
 		snatList := ovnv1.IptablesSnatRuleList{}
 		dnatList := ovnv1.IptablesDnatRuleList{}
 
-		for natType := range strings.SplitSeq(eip.Status.Nat, ",") {
-			switch natType {
-			case util.FipUsingEip:
-				err = v.cache.List(ctx, &fipList, cli.MatchingLabels{util.EipV4IpLabel: eip.Status.IP})
-			case util.SnatUsingEip:
-				err = v.cache.List(ctx, &snatList, cli.MatchingLabels{util.EipV4IpLabel: eip.Status.IP})
-			case util.DnatUsingEip:
-				err = v.cache.List(ctx, &dnatList, cli.MatchingLabels{util.EipV4IpLabel: eip.Status.IP})
-			}
+		selector := cli.MatchingLabels{util.EipUIDLabel: string(eip.UID)}
+		if err = v.cache.List(ctx, &fipList, selector); err == nil {
+			err = v.cache.List(ctx, &snatList, selector)
+		}
+		if err == nil {
+			err = v.cache.List(ctx, &dnatList, selector)
 		}
 
 		if err != nil {
@@ -224,7 +221,17 @@ func (v *ValidatingHook) iptablesEIPDeleteHook(ctx context.Context, req admissio
 		}
 
 		if len(fipList.Items) != 0 || len(snatList.Items) != 0 || len(dnatList.Items) != 0 {
-			err = fmt.Errorf("eip \"%s\" is still in use, you need to delete the %s of eip first", eip.Name, eip.Status.Nat)
+			var inUse []string
+			if len(fipList.Items) != 0 {
+				inUse = append(inUse, util.FipUsingEip)
+			}
+			if len(snatList.Items) != 0 {
+				inUse = append(inUse, util.SnatUsingEip)
+			}
+			if len(dnatList.Items) != 0 {
+				inUse = append(inUse, util.DnatUsingEip)
+			}
+			err = fmt.Errorf("eip \"%s\" is still in use, you need to delete the %s of eip first", eip.Name, strings.Join(inUse, ","))
 			return ctrlwebhook.Errored(http.StatusBadRequest, err)
 		}
 	}
@@ -452,12 +459,8 @@ func (v *ValidatingHook) ValidateVpcNatGW(ctx context.Context, gw *ovnv1.VpcNatG
 		}
 	}
 
-	if gw.Spec.QoSPolicy != "" {
-		qos := &ovnv1.QoSPolicy{}
-		key = cli.ObjectKey{Name: gw.Spec.QoSPolicy}
-		if err := v.cache.Get(ctx, key, qos); err != nil {
-			return err
-		}
+	if err := validateQoSPolicyRef(ctx, v.cache, gw.Spec.QoSPolicy); err != nil {
+		return err
 	}
 
 	return nil
@@ -495,9 +498,51 @@ func (v *ValidatingHook) ValidateVpcNatGatewayConfig(ctx context.Context) error 
 	return nil
 }
 
+func validateEipRef(ctx context.Context, reader cli.Reader, name string) error {
+	eip := &ovnv1.IptablesEIP{}
+	if err := reader.Get(ctx, cli.ObjectKey{Name: name}, eip); err != nil {
+		return err
+	}
+	if !eip.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("eip %s is terminating", name)
+	}
+	return nil
+}
+
+func validateNatGwRef(ctx context.Context, reader cli.Reader, name string) error {
+	gw := &ovnv1.VpcNatGateway{}
+	if err := reader.Get(ctx, cli.ObjectKey{Name: name}, gw); err != nil {
+		return err
+	}
+	if !gw.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("vpc nat gateway %s is terminating", name)
+	}
+	return nil
+}
+
+func validateQoSPolicyRef(ctx context.Context, reader cli.Reader, name string) error {
+	if name == "" {
+		return nil
+	}
+	qos := &ovnv1.QoSPolicy{}
+	if err := reader.Get(ctx, cli.ObjectKey{Name: name}, qos); err != nil {
+		return err
+	}
+	if !qos.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("qos policy %s is terminating", name)
+	}
+	return nil
+}
+
 func (v *ValidatingHook) ValidateIptablesEIP(ctx context.Context, eip *ovnv1.IptablesEIP) error {
 	if eip.Spec.NatGwDp == "" {
 		return errors.New("parameter \"natGwDp\" cannot be empty")
+	}
+	if err := validateNatGwRef(ctx, v.cache, eip.Spec.NatGwDp); err != nil {
+		return err
+	}
+	if err := validateQoSPolicyRef(ctx, v.cache, eip.Spec.QoSPolicy); err != nil {
+		return err
 	}
 
 	subnet := &ovnv1.Subnet{}
@@ -548,6 +593,14 @@ func (v *ValidatingHook) ValidateIptablesDnat(ctx context.Context, dnat *ovnv1.I
 	key := cli.ObjectKey{Name: dnat.Spec.EIP}
 	if err := v.cache.Get(ctx, key, eip); err != nil {
 		return err
+	}
+	if err := validateEipRef(ctx, v.cache, dnat.Spec.EIP); err != nil {
+		return err
+	}
+	if eip.Spec.NatGwDp != "" {
+		if err := validateNatGwRef(ctx, v.cache, eip.Spec.NatGwDp); err != nil {
+			return err
+		}
 	}
 
 	if dnat.Spec.ExternalPort == "" {
@@ -628,7 +681,7 @@ func (v *ValidatingHook) ValidateIptablesDnat(ctx context.Context, dnat *ovnv1.I
 	// which shadows any port-specific DNAT rules (SHARED_DNAT) for the same EIP.
 	if eip.Status.IP != "" {
 		fipList := &ovnv1.IptablesFIPRuleList{}
-		if err := v.cache.List(ctx, fipList, cli.MatchingLabels{util.EipV4IpLabel: eip.Status.IP}); err != nil {
+		if err := v.cache.List(ctx, fipList, cli.MatchingLabels{util.EipUIDLabel: string(eip.UID)}); err != nil {
 			return fmt.Errorf("failed to list iptables FIP rules: %w", err)
 		}
 		if len(fipList.Items) != 0 {
@@ -648,6 +701,14 @@ func (v *ValidatingHook) ValidateIptablesSnat(ctx context.Context, snat *ovnv1.I
 	if err := v.cache.Get(ctx, key, eip); err != nil {
 		return err
 	}
+	if err := validateEipRef(ctx, v.cache, snat.Spec.EIP); err != nil {
+		return err
+	}
+	if eip.Spec.NatGwDp != "" {
+		if err := validateNatGwRef(ctx, v.cache, eip.Spec.NatGwDp); err != nil {
+			return err
+		}
+	}
 
 	if err := util.CheckCidrs(snat.Spec.InternalCIDR); err != nil {
 		return fmt.Errorf("invalid cidr %s", snat.Spec.InternalCIDR)
@@ -666,6 +727,14 @@ func (v *ValidatingHook) ValidateIptablesFip(ctx context.Context, fip *ovnv1.Ipt
 	if err := v.cache.Get(ctx, key, eip); err != nil {
 		return err
 	}
+	if err := validateEipRef(ctx, v.cache, fip.Spec.EIP); err != nil {
+		return err
+	}
+	if eip.Spec.NatGwDp != "" {
+		if err := validateNatGwRef(ctx, v.cache, eip.Spec.NatGwDp); err != nil {
+			return err
+		}
+	}
 
 	if net.ParseIP(fip.Spec.InternalIP) == nil {
 		err := fmt.Errorf("internalIP %s is not a valid", fip.Spec.InternalIP)
@@ -676,7 +745,7 @@ func (v *ValidatingHook) ValidateIptablesFip(ctx context.Context, fip *ovnv1.Ipt
 	// which shadows any port-specific DNAT rules (SHARED_DNAT) for the same EIP.
 	if eip.Status.IP != "" {
 		dnatList := &ovnv1.IptablesDnatRuleList{}
-		if err := v.cache.List(ctx, dnatList, cli.MatchingLabels{util.EipV4IpLabel: eip.Status.IP}); err != nil {
+		if err := v.cache.List(ctx, dnatList, cli.MatchingLabels{util.EipUIDLabel: string(eip.UID)}); err != nil {
 			return fmt.Errorf("failed to list iptables DNAT rules: %w", err)
 		}
 		if len(dnatList.Items) != 0 {
