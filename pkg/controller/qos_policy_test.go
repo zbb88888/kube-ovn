@@ -14,6 +14,43 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
+func TestQoSPolicyDeleteHonorsUIDClaim(t *testing.T) {
+	makePolicy := func() *kubeovnv1.QoSPolicy {
+		now := metav1.Now()
+		return &kubeovnv1.QoSPolicy{
+			Name:              "qos-delete",
+			UID:               "qos-delete-uid",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{util.KubeOVNControllerFinalizer},
+			Spec:              kubeovnv1.QoSPolicySpec{BindingType: kubeovnv1.QoSBindingTypeEIP},
+		}
+	}
+
+	t.Run("referencing EIP blocks finalizer removal", func(t *testing.T) {
+		qos := makePolicy()
+		eip := &kubeovnv1.IptablesEIP{
+			Name: "eip", UID: "eip-uid", Labels: map[string]string{util.QoSPolicyUIDLabel: string(qos.UID)},
+			Spec: kubeovnv1.IptablesEIPSpec{QoSPolicy: qos.Name},
+		}
+		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{QoSPolicies: []*kubeovnv1.QoSPolicy{qos}, IptablesEips: []*kubeovnv1.IptablesEIP{eip}})
+		require.NoError(t, err)
+		require.NoError(t, fc.fakeController.handleUpdateQoSPolicy(qos.Name))
+		got, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().QoSPolicies().Get(context.Background(), qos.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Contains(t, got.Finalizers, util.KubeOVNControllerFinalizer)
+	})
+
+	t.Run("without claim removes finalizer", func(t *testing.T) {
+		qos := makePolicy()
+		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{QoSPolicies: []*kubeovnv1.QoSPolicy{qos}})
+		require.NoError(t, err)
+		require.NoError(t, fc.fakeController.handleUpdateQoSPolicy(qos.Name))
+		got, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().QoSPolicies().Get(context.Background(), qos.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.NotContains(t, got.Finalizers, util.KubeOVNControllerFinalizer)
+	})
+}
+
 func TestEnqueueQoSPolicyRelease(t *testing.T) {
 	t.Parallel()
 	q := newTypedRateLimitingQueue[string]("UpdateQoSPolicy", nil)
