@@ -149,13 +149,15 @@ func TestIptablesEipDeleteHonorsUIDClaim(t *testing.T) {
 		now := metav1.Now()
 		return &kubeovnv1.IptablesEIP{
 			Name: "eip-delete", UID: "eip-delete-uid", DeletionTimestamp: &now,
-			Finalizers: []string{util.KubeOVNControllerFinalizer}}
+			Finalizers: []string{util.KubeOVNControllerFinalizer},
+		}
 	}
 
 	t.Run("matching claim blocks finalizer removal", func(t *testing.T) {
 		eip := newEip()
 		fip := &kubeovnv1.IptablesFIPRule{
-			Name: "fip", Labels: map[string]string{util.EipUIDLabel: string(eip.UID)}}
+			Name: "fip", Labels: map[string]string{util.EipUIDLabel: string(eip.UID)},
+		}
 		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
 			IptablesEips: []*kubeovnv1.IptablesEIP{eip}, IptablesFips: []*kubeovnv1.IptablesFIPRule{fip},
 		})
@@ -169,7 +171,8 @@ func TestIptablesEipDeleteHonorsUIDClaim(t *testing.T) {
 	t.Run("different UID does not block finalizer removal", func(t *testing.T) {
 		eip := newEip()
 		fip := &kubeovnv1.IptablesFIPRule{
-			Name: "fip", Labels: map[string]string{util.EipUIDLabel: "other-uid", util.EipV4IpLabel: "same-address"}}
+			Name: "fip", Labels: map[string]string{util.EipUIDLabel: "other-uid", util.EipV4IpLabel: "same-address"},
+		}
 		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
 			IptablesEips: []*kubeovnv1.IptablesEIP{eip}, IptablesFips: []*kubeovnv1.IptablesFIPRule{fip},
 		})

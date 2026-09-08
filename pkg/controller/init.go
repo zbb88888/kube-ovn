@@ -47,13 +47,26 @@ func (c *Controller) syncNatUIDLabels() error {
 		eip := eips.Items[i].DeepCopy()
 		uid := qosUID[eip.Spec.QoSPolicy]
 		hasBinding := eip.Labels[util.QoSLabel] == eip.Spec.QoSPolicy || eip.Status.QoSPolicy == eip.Spec.QoSPolicy
-		if uid == "" || (!eip.DeletionTimestamp.IsZero() && !hasBinding) || eip.Labels[util.QoSPolicyUIDLabel] == uid {
+		if !eip.DeletionTimestamp.IsZero() && !hasBinding {
+			continue
+		}
+		if uid == "" && eip.Spec.QoSPolicy == "" && eip.Labels[util.QoSLabel] == "" && eip.Labels[util.QoSPolicyUIDLabel] == "" {
 			continue
 		}
 		if eip.Labels == nil {
 			eip.Labels = map[string]string{}
 		}
-		eip.Labels[util.QoSPolicyUIDLabel] = uid
+		if uid == "" && eip.Spec.QoSPolicy != "" {
+			continue
+		}
+		if uid == "" {
+			delete(eip.Labels, util.QoSLabel)
+			delete(eip.Labels, util.QoSPolicyUIDLabel)
+		} else {
+			eip.Labels[util.QoSLabel] = eip.Spec.QoSPolicy
+			eip.Labels[util.QoSPolicyUIDLabel] = uid
+		}
+
 		if _, err = c.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Update(ctx, eip, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
@@ -67,13 +80,26 @@ func (c *Controller) syncNatUIDLabels() error {
 		gw := gws.Items[i].DeepCopy()
 		uid := qosUID[gw.Spec.QoSPolicy]
 		hasBinding := gw.Labels[util.QoSLabel] == gw.Spec.QoSPolicy || gw.Status.QoSPolicy == gw.Spec.QoSPolicy
-		if uid == "" || (!gw.DeletionTimestamp.IsZero() && !hasBinding) || gw.Labels[util.QoSPolicyUIDLabel] == uid {
+		if !gw.DeletionTimestamp.IsZero() && !hasBinding {
+			continue
+		}
+		if uid == "" && gw.Spec.QoSPolicy == "" && gw.Labels[util.QoSLabel] == "" && gw.Labels[util.QoSPolicyUIDLabel] == "" {
 			continue
 		}
 		if gw.Labels == nil {
 			gw.Labels = map[string]string{}
 		}
-		gw.Labels[util.QoSPolicyUIDLabel] = uid
+		if uid == "" && gw.Spec.QoSPolicy != "" {
+			continue
+		}
+		if uid == "" {
+			delete(gw.Labels, util.QoSLabel)
+			delete(gw.Labels, util.QoSPolicyUIDLabel)
+		} else {
+			gw.Labels[util.QoSLabel] = gw.Spec.QoSPolicy
+			gw.Labels[util.QoSPolicyUIDLabel] = uid
+		}
+
 		if _, err = c.config.KubeOvnClient.KubeovnV1().VpcNatGateways().Update(ctx, gw, metav1.UpdateOptions{}); err != nil {
 			return err
 		}
@@ -118,10 +144,6 @@ func (c *Controller) syncNatRuleUIDLabels(ctx context.Context, eips []kubeovnv1.
 
 func (c *Controller) syncNatRuleUID(ctx context.Context, rule client.Object, eips map[string]string) error {
 	// The concrete rule types expose Spec.EIP; use the existing label when no migration target exists.
-	uid := rule.GetLabels()[util.EipUIDLabel]
-	if uid != "" {
-		return nil
-	}
 	var eipName string
 	switch obj := rule.(type) {
 	case *kubeovnv1.IptablesFIPRule:
@@ -131,8 +153,8 @@ func (c *Controller) syncNatRuleUID(ctx context.Context, rule client.Object, eip
 	case *kubeovnv1.IptablesSnatRule:
 		eipName = obj.Spec.EIP
 	}
-	uid = eips[eipName]
-	if uid == "" || (!rule.GetDeletionTimestamp().IsZero() && rule.GetLabels()[util.EipV4IpLabel] == "") {
+	uid := eips[eipName]
+	if uid == "" || (!rule.GetDeletionTimestamp().IsZero() && rule.GetLabels()[util.EipV4IpLabel] == "") || rule.GetLabels()[util.EipUIDLabel] == uid {
 		return nil
 	}
 	updated := rule.DeepCopyObject().(client.Object)
