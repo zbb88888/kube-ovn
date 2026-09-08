@@ -14,6 +14,22 @@ import (
 	"github.com/kubeovn/kube-ovn/pkg/util"
 )
 
+func TestEnqueueQoSPolicyRelease(t *testing.T) {
+	t.Parallel()
+	q := newTypedRateLimitingQueue[string]("UpdateQoSPolicy", nil)
+	t.Cleanup(q.ShutDown)
+	c := &Controller{updateQoSPolicyQueue: q}
+	c.enqueueQoSPolicyRelease(map[string]string{util.QoSLabel: "old"}, map[string]string{util.QoSLabel: "new"})
+	require.Equal(t, 1, q.Len())
+	got, shutdown := q.Get()
+	require.False(t, shutdown)
+	require.Equal(t, "old", got)
+	q.Done(got)
+
+	c.enqueueQoSPolicyRelease(map[string]string{util.QoSLabel: "old"}, map[string]string{util.QoSLabel: "old"})
+	require.Equal(t, 0, q.Len())
+}
+
 func TestValidateRateValue(t *testing.T) {
 	t.Parallel()
 
