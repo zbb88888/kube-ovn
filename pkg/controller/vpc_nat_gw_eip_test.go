@@ -123,6 +123,28 @@ func TestSyncNatUIDLabelsKeepsTerminatingBindings(t *testing.T) {
 	require.Equal(t, "eip-uid", gotFip.Labels[util.EipUIDLabel])
 }
 
+func TestSyncNatUIDLabelsCorrectsStaleAndClearsDroppedQoS(t *testing.T) {
+	qos := &kubeovnv1.QoSPolicy{Name: "qos", UID: "current-uid"}
+	stale := &kubeovnv1.IptablesEIP{
+		Name: "stale", Labels: map[string]string{util.QoSLabel: "qos", util.QoSPolicyUIDLabel: "old-uid"},
+		Spec: kubeovnv1.IptablesEIPSpec{QoSPolicy: "qos"},
+	}
+	cleared := &kubeovnv1.IptablesEIP{
+		Name: "cleared", Labels: map[string]string{util.QoSLabel: "qos", util.QoSPolicyUIDLabel: "old-uid"},
+	}
+	fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{QoSPolicies: []*kubeovnv1.QoSPolicy{qos}, IptablesEips: []*kubeovnv1.IptablesEIP{stale, cleared}})
+	require.NoError(t, err)
+	require.NoError(t, fc.fakeController.syncNatUIDLabels())
+
+	got, err := fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Get(context.Background(), "stale", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "current-uid", got.Labels[util.QoSPolicyUIDLabel])
+	got, err = fc.fakeController.config.KubeOvnClient.KubeovnV1().IptablesEIPs().Get(context.Background(), "cleared", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotContains(t, got.Labels, util.QoSPolicyUIDLabel)
+	require.NotContains(t, got.Labels, util.QoSLabel)
+}
+
 func TestQoSPolicyUID(t *testing.T) {
 	t.Parallel()
 	qos := &kubeovnv1.QoSPolicy{Name: "qos", UID: "qos-uid"}
