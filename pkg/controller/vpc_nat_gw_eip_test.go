@@ -47,6 +47,52 @@ func TestSyncNatUIDLabels(t *testing.T) {
 	require.Equal(t, "eip-uid", gotFip.Labels[util.EipUIDLabel])
 }
 
+func TestFipRebindPreservesEipClaim(t *testing.T) {
+	oldEnabled := vpcNatEnabled
+	vpcNatEnabled = "true"
+	t.Cleanup(func() { vpcNatEnabled = oldEnabled })
+
+	newFip := func(statusGateway string) *kubeovnv1.IptablesFIPRule {
+		return &kubeovnv1.IptablesFIPRule{
+			Name: "fip", Labels: map[string]string{util.EipUIDLabel: "old-uid"},
+			Spec:   kubeovnv1.IptablesFIPRuleSpec{EIP: "new-eip", InternalIP: "10.0.0.1"},
+			Status: kubeovnv1.IptablesFIPRuleStatus{V4ip: "1.1.1.1", NatGwDp: statusGateway, InternalIP: "10.0.0.1", Ready: true},
+		}
+	}
+	setup := func(t *testing.T, fip *kubeovnv1.IptablesFIPRule) *Controller {
+		t.Helper()
+		eip := &kubeovnv1.IptablesEIP{
+			Name: "new-eip", UID: "new-uid",
+			Spec:   kubeovnv1.IptablesEIPSpec{V4ip: "2.2.2.2", NatGwDp: "gw"},
+			Status: kubeovnv1.IptablesEIPStatus{IP: "2.2.2.2"},
+		}
+		fc, err := newFakeControllerWithOptions(t, &FakeControllerOptions{
+			VpcNatGateways: []*kubeovnv1.VpcNatGateway{fakeGw("gw")},
+			IptablesEips:   []*kubeovnv1.IptablesEIP{eip},
+			IptablesFips:   []*kubeovnv1.IptablesFIPRule{fip},
+		})
+		require.NoError(t, err)
+		return fc.fakeController
+	}
+	getClaim := func(t *testing.T, c *Controller) string {
+		t.Helper()
+		fip, err := c.config.KubeOvnClient.KubeovnV1().IptablesFIPRules().Get(context.Background(), "fip", metav1.GetOptions{})
+		require.NoError(t, err)
+		return fip.Labels[util.EipUIDLabel]
+	}
+
+	t.Run("old claim remains when old rule cleanup fails", func(t *testing.T) {
+		c := setup(t, newFip("gw"))
+		require.Error(t, c.handleUpdateIptablesFip("fip"))
+		require.Equal(t, "old-uid", getClaim(t, c))
+	})
+	t.Run("new claim is written before new rule creation", func(t *testing.T) {
+		c := setup(t, newFip("retired-gw"))
+		require.Error(t, c.handleUpdateIptablesFip("fip"))
+		require.Equal(t, "new-uid", getClaim(t, c))
+	})
+}
+
 func TestSyncNatUIDLabelsKeepsTerminatingBindings(t *testing.T) {
 	now := metav1.Now()
 	qos := &kubeovnv1.QoSPolicy{Name: "qos", UID: "qos-uid", DeletionTimestamp: &now}
